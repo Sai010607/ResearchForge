@@ -1,7 +1,16 @@
 # Netlify config (frontend). The backend runs on Render; /api/* is proxied to it so that
-# login cookies and CSRF checks stay same-site. Edit the backend URL below if yours differs.
+# login cookies and CSRF checks stay same-site.
+[build]
+  command = "npm run build"
+  publish = ".next"
+
 [build.environment]
   NEXT_PUBLIC_API_URL = "same-origin"
+  NODE_VERSION = "22"
+
+# Next.js runtime: turns the Next build into Netlify functions (without it the site is a static 404).
+[[plugins]]
+  package = "@netlify/plugin-nextjs"
 
 [[redirects]]
   from = "/api/*"
