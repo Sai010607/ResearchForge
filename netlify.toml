@@ -1,0 +1,6 @@
+# The Next.js app lives in /frontend; the repo root has no site to publish.
+[build]
+  base = "frontend"
+  # Install dependencies first so the `next` binary is available in every build environment.
+  command = "npm install --no-audit --no-fund && npm run build"
+  publish = ".next"
