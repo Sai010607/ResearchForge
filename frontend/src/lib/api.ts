@@ -1,7 +1,10 @@
 import type { LoginInput, RegisterInput, SessionInfo } from "@/types/auth";
 import type { Project, ProjectInput } from "@/types/project";
 
-export const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
+// NEXT_PUBLIC_API_URL=same-origin makes the browser call /api/... on the site itself (used on Netlify,
+// where a rewrite proxies /api/* to the backend so login cookies stay first-party).
+const RAW_API_URL = process.env.NEXT_PUBLIC_API_URL;
+export const API_URL = RAW_API_URL === "same-origin" ? "" : (RAW_API_URL ?? "http://localhost:8000");
 
 /** Backend error with the machine-readable `code` (e.g. "trial_exhausted") and per-field messages. */
 export class ApiError extends Error {
