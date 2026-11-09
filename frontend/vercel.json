@@ -1,0 +1,8 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "framework": "nextjs",
+  "build": { "env": { "NEXT_PUBLIC_API_URL": "same-origin" } },
+  "rewrites": [
+    { "source": "/api/:path*", "destination": "https://researchforge-api-05pc.onrender.com/api/:path*" }
+  ]
+}
