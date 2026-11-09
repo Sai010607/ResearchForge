@@ -4,7 +4,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import text
 
-from app.api.routes import auth, guest, projects
+from app.api.routes import auth, guest, literature, projects
 from app.core.config import get_settings
 from app.core.csrf import CSRFMiddleware
 from app.core.database import engine
@@ -29,6 +29,7 @@ app.add_middleware(
 app.include_router(auth.router)
 app.include_router(guest.router)
 app.include_router(projects.router)
+app.include_router(literature.router)
 
 
 @app.get("/api/health", tags=["system"])

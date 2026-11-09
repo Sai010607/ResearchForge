@@ -8,6 +8,7 @@ import { buildProjectGraph, clusterSizes } from "@/lib/graph";
 import { Counter } from "@/components/ui/Counter";
 import { Reveal } from "@/components/ui/Reveal";
 import { ProjectList } from "@/components/projects/ProjectList";
+import { useMyPapers } from "@/hooks/useMyPapers";
 import { useProjects } from "@/hooks/useProjects";
 import { cn } from "@/lib/utils";
 
@@ -64,7 +65,8 @@ export function DashboardView() {
   const modalities = useMemo(() => tally(projects.map((p) => p.modality)), [projects]);
   const diseases = useMemo(() => tally(projects.map((p) => p.disease)), [projects]);
 
-  const graph = useMemo(() => buildProjectGraph(projects), [projects]);
+  const { papers, loading: papersLoading, error: papersError } = useMyPapers();
+  const graph = useMemo(() => buildProjectGraph(projects, papers), [projects, papers]);
   const clusters = useMemo(() => clusterSizes(graph.nodes, graph.edges), [graph]);
   const timeline = useMemo(
     () => [...projects].sort((a, b) => b.created_at.localeCompare(a.created_at)).slice(0, 6),
@@ -74,8 +76,8 @@ export function DashboardView() {
 
   const stats: { label: string; value: number | null; note: string; live: boolean }[] = [
     { label: "Research projects", value: loading || error ? null : projects.length, note: "Live from PostgreSQL", live: true },
-    { label: "Indexed literature", value: null, note: "Not available yet", live: false },
-    { label: "Project graph nodes", value: ready ? graph.nodes.length : null, note: "Derived from your projects", live: true },
+    { label: "Saved papers", value: papersLoading || papersError ? null : papers.length, note: "Saved from OpenAlex / Europe PMC", live: true },
+    { label: "Project graph nodes", value: ready ? graph.nodes.length : null, note: "Derived from your projects and saved papers", live: true },
     { label: "Completed experiments", value: null, note: "Not available yet", live: false },
     { label: "Active pipelines", value: null, note: "Not available yet", live: false },
   ];
@@ -161,7 +163,7 @@ export function DashboardView() {
         <Reveal delay={0.05}>
           <section className="glass lift h-full rounded-2xl p-6">
             <h2 className="text-sm font-medium">Knowledge graph</h2>
-            <p className="mt-1 text-xs text-muted">Computed from your saved projects. Literature nodes arrive with the literature module.</p>
+            <p className="mt-1 text-xs text-muted">Computed from your saved projects. Includes papers you saved from the Literature page.</p>
             <dl className="mt-5 grid grid-cols-3 gap-3">
               {[
                 ["Nodes", graph.nodes.length],

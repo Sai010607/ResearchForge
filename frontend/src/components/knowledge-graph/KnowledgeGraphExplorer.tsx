@@ -6,6 +6,7 @@ import dynamic from "next/dynamic";
 import Link from "next/link";
 import { useMemo, useState } from "react";
 import { WebGLBoundary } from "@/components/ui/WebGLBoundary";
+import { useMyPapers } from "@/hooks/useMyPapers";
 import { useProjects } from "@/hooks/useProjects";
 import { buildProjectGraph, buildSampleGraph, clusterSizes, layout3d, NODE_STYLE, type NodeType } from "@/lib/graph";
 import { cn } from "@/lib/utils";
@@ -20,6 +21,7 @@ const SAMPLE = buildSampleGraph();
 
 export function KnowledgeGraphExplorer() {
   const { projects, loading } = useProjects();
+  const { papers } = useMyPapers();
   const reduced = !!useReducedMotion();
   const [userMode, setUserMode] = useState<Mode | null>(null);
   const [query, setQuery] = useState("");
@@ -28,7 +30,7 @@ export function KnowledgeGraphExplorer() {
   const [compact] = useState(() => typeof window !== "undefined" && window.innerWidth < 768);
 
   const mode: Mode = userMode ?? (projects.length > 0 ? "projects" : "sample");
-  const projectGraph = useMemo(() => buildProjectGraph(projects), [projects]);
+  const projectGraph = useMemo(() => buildProjectGraph(projects, papers), [projects, papers]);
   const data = mode === "projects" ? projectGraph : SAMPLE;
   const positions = useMemo(() => layout3d(data.nodes, data.edges), [data]);
   const visibleTypes = useMemo(
@@ -97,7 +99,7 @@ export function KnowledgeGraphExplorer() {
       {mode === "sample" && (
         <div role="note" className="mb-4 rounded-lg border border-amber-400/30 bg-amber-400/[0.07] px-4 py-3 text-xs text-amber-200">
           <strong className="font-semibold">Sample data.</strong> This is a synthetic structure that demonstrates the explorer. “Sample paper” and “Sample
-          author” nodes are placeholders, not real publications. Real literature arrives with the Literature module (Phase 3).
+          author” nodes are placeholders, not real publications. Switch to “My projects” to see papers you saved from the Literature page.
         </div>
       )}
 

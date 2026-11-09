@@ -64,7 +64,7 @@ def _clean_state():
     with engine.begin() as conn:
         conn.execute(
             text(
-                "TRUNCATE projects, auth_tokens, refresh_sessions, guest_sessions, users "
+                "TRUNCATE papers, projects, auth_tokens, refresh_sessions, guest_sessions, users "
                 "RESTART IDENTITY CASCADE"
             )
         )

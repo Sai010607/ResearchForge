@@ -1,3 +1,4 @@
+import type { Paper } from "@/types/paper";
 import type { Project } from "@/types/project";
 import { mulberry32 } from "./utils";
 
@@ -21,25 +22,65 @@ export const NODE_STYLE: Record<NodeType, { label: string; color: string; shape:
   disease: { label: "Disease / domain", color: "#fbbf24", shape: "cone", size: 0.38 },
 };
 
-/** REAL graph: derived live from the user's saved projects. */
-export function buildProjectGraph(projects: Project[]): GraphData {
+const clip = (t: string, n: number) => (t.length > n ? `${t.slice(0, n - 1)}…` : t);
+
+/**
+ * REAL graph: derived live from the user's saved projects and the papers they saved to them.
+ * Paper nodes come from OpenAlex / Europe PMC; dataset, method, modality and disease links come from
+ * rule-based tags found in each paper's own title/abstract (the matched text is shown in the panel).
+ */
+export function buildProjectGraph(projects: Project[], papers: Paper[] = []): GraphData {
   const nodes = new Map<string, GNode>();
   const edges: GEdge[] = [];
+  const edgeKeys = new Set<string>();
+  const link = (source: string, target: string, relation: string) => {
+    const k = `${source}|${target}|${relation}`;
+    if (!edgeKeys.has(k)) {
+      edgeKeys.add(k);
+      edges.push({ source, target, relation });
+    }
+  };
   for (const p of projects) {
     const pid = `project:${p.id}`;
     nodes.set(pid, { id: pid, label: `Project #${p.id}`, type: "project", detail: p.research_question });
     const mid = `modality:${p.modality}`;
     nodes.set(mid, { id: mid, label: p.modality, type: "modality", detail: "Imaging modality" });
-    edges.push({ source: pid, target: mid, relation: "Uses modality" });
+    link(pid, mid, "Uses modality");
     const did = `disease:${p.disease}`;
     nodes.set(did, { id: did, label: p.disease, type: "disease", detail: "Research domain" });
-    edges.push({ source: pid, target: did, relation: "Studies disease" });
+    link(pid, did, "Studies disease");
     for (const o of p.objectives) {
       const oid = `objective:${o}`;
       nodes.set(oid, { id: oid, label: o, type: "concept", detail: "Research objective" });
-      edges.push({ source: pid, target: oid, relation: "Shares research objective" });
+      link(pid, oid, "Shares research objective");
     }
   }
+  const projectIds = new Set(projects.map((p) => p.id));
+  for (const paper of papers) {
+    const nid = `paper:${paper.id}`;
+    const meta = [paper.year, paper.venue, paper.doi ? `doi:${paper.doi}` : null].filter(Boolean).join(" · ");
+    nodes.set(nid, { id: nid, label: clip(paper.title, 46), type: "paper", detail: `${paper.title}${meta ? `\n${meta}` : ""}` });
+    for (const pid of paper.project_ids) if (projectIds.has(pid)) link(`project:${pid}`, nid, "Saved in project");
+    for (const a of paper.authors.slice(0, 3)) {
+      const aid = `author:${a.toLowerCase()}`;
+      nodes.set(aid, { id: aid, label: a, type: "author", detail: "Author (from the paper's source record)" });
+      link(aid, nid, "Authored");
+    }
+    const ex = paper.extracted;
+    const tag = (list: { value: string; matched: string; field: string }[] | undefined, type: NodeType, prefix: string, relation: string, detail: string) => {
+      for (const t of list ?? []) {
+        const id = `${prefix}:${t.value}`;
+        if (!nodes.has(id)) nodes.set(id, { id, label: t.value, type, detail });
+        link(nid, id, `${relation} (matched “${t.matched}” in ${t.field})`);
+      }
+    };
+    tag(ex.modalities, "modality", "modality", "Uses modality", "Imaging modality");
+    tag(ex.diseases, "disease", "disease", "Studies disease", "Research domain");
+    tag(ex.datasets, "dataset", "dataset", "Uses dataset", "Dataset named in the paper");
+    tag(ex.methods, "method", "method", "Applies methodology", "Method named in the paper");
+  }
+  const byId = new Map(papers.map((p) => [p.id, p]));
+  for (const paper of papers) for (const c of paper.cites) if (byId.has(c)) link(`paper:${paper.id}`, `paper:${c}`, "Cites");
   return { nodes: [...nodes.values()], edges, synthetic: false };
 }
 

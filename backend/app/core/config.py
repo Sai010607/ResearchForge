@@ -39,6 +39,12 @@ class Settings(BaseSettings):
     require_email_verification: bool = False
     max_projects_per_user: int = 200
     project_creates_per_hour: int = 30
+    max_papers_per_project: int = 200
+    literature_searches_per_hour: int = 60
+
+    # --- literature sources (OpenAlex asks for a contact email: it moves you to their faster pool) ---
+    contact_email: str = ""
+    literature_timeout_seconds: float = 10.0
 
     # --- abuse protection ---
     rate_limit_enabled: bool = True

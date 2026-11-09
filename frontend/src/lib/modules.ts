@@ -12,7 +12,7 @@ export interface ResearchModule {
 }
 
 export const MODULES: ResearchModule[] = [
-  { id: "literature", number: "01", title: "Literature Retrieval", blurb: "Semantic search across scientific publications.", accent: "#2563ff", status: "planned", phase: 3, href: "/literature" },
+  { id: "literature", number: "01", title: "Literature Retrieval", blurb: "Semantic search across scientific publications.", accent: "#2563ff", status: "preview", phase: 1, href: "/literature" },
   { id: "metadata", number: "02", title: "Metadata Extraction", blurb: "Extract authors, methods, datasets, findings, and research parameters.", accent: "#00cfff", status: "planned", phase: 4 },
   { id: "graph", number: "03", title: "Knowledge Graph", blurb: "Build relationships between scientific concepts and publications.", accent: "#8b5cf6", status: "preview", phase: 4, href: "/knowledge-graph" },
   { id: "novelty", number: "04", title: "Novelty Analysis", blurb: "Identify research gaps, overlaps, and potential contributions.", accent: "#2dd4bf", status: "planned", phase: 4 },
@@ -24,7 +24,7 @@ export const MODULES: ResearchModule[] = [
 
 export const PIPELINE = [
   { id: "idea", label: "Research Idea", live: true },
-  { id: "literature", label: "Literature", live: false },
+  { id: "literature", label: "Literature", live: true },
   { id: "metadata", label: "Metadata", live: false },
   { id: "graph", label: "Knowledge Graph", live: false },
   { id: "novelty", label: "Novelty & Gaps", live: false },
