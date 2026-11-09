@@ -25,6 +25,31 @@ const TAG_GROUPS = [
 ] as const;
 
 const keyOf = (h: { source: string; external_id: string }) => `${h.source}:${h.external_id}`;
+/** Identity keys of a result: provider records plus DOI / PMID / PMCID / arXiv id. Two results sharing any key are the same paper. */
+const idsOf = (h: PaperHit) => [
+  ...refsOf(h),
+  ...(h.doi ? [`doi:${h.doi.toLowerCase()}`] : []),
+  ...(h.pmid ? [`pmid:${h.pmid}`] : []),
+  ...(h.pmcid ? [`pmcid:${h.pmcid}`] : []),
+  ...(h.arxiv_id ? [`arxiv:${h.arxiv_id.toLowerCase()}`] : []),
+];
+/** Add a page of results, merging any paper that is already listed (same paper returned again, possibly by another provider). */
+function appendResults(prev: PaperHit[], incoming: PaperHit[]): PaperHit[] {
+  const out = [...prev];
+  for (const h of incoming) {
+    const keys = new Set(idsOf(h));
+    const i = out.findIndex((o) => idsOf(o).some((k) => keys.has(k)));
+    if (i < 0) {
+      out.push(h);
+      continue;
+    }
+    const o = out[i];
+    const sources = [...(o.sources ?? []), ...(h.sources ?? [])].filter((s, j, a) => a.findIndex((x) => x.provider === s.provider && x.external_id === s.external_id) === j);
+    const links = [...(o.links ?? []), ...(h.links ?? [])].filter((l, j, a) => a.findIndex((x) => x.url === l.url) === j);
+    out[i] = { ...o, sources, links, abstract: o.abstract ?? h.abstract, doi: o.doi ?? h.doi, pmid: o.pmid ?? h.pmid, pmcid: o.pmcid ?? h.pmcid };
+  }
+  return out;
+}
 const refsOf = (h: PaperHit) => (h.sources?.length ? h.sources.map((s) => `${s.provider}:${s.external_id}`) : [keyOf(h)]);
 const providerName = (id: string) => ({ openalex: "OpenAlex", europepmc: "Europe PMC", pubmed: "PubMed", crossref: "Crossref", semanticscholar: "Semantic Scholar", arxiv: "arXiv" })[id] ?? id;
 
@@ -48,8 +73,11 @@ function Tags({ paper }: { paper: PaperHit }) {
 function Card({ paper, children }: { paper: PaperHit; children: React.ReactNode }) {
   const [open, setOpen] = useState(false);
   const links = paper.links ?? [];
-  // "Open source" prefers the publisher page, then the DOI, then PubMed, then whatever the source gave
-  const primary = ["publisher", "doi", "pubmed", "arxiv"].map((k) => links.find((l) => l.kind === k)).find(Boolean) ?? (paper.url ? { url: paper.url } : links[0]);
+  // "Open source": DOI (the registrant's current target), then PMC full text, PubMed, arXiv, the publisher-supplied page,
+  // then any other source page. Europe PMC article pages come last: they can fail for very new records.
+  const primary =
+    ["doi", "pmc", "pubmed", "arxiv", "publisher"].map((k) => links.find((l) => l.kind === k)).find(Boolean) ??
+    links.find((l) => l.kind !== "europepmc") ?? links[0] ?? (paper.url ? { url: paper.url } : undefined);
   return (
     <li className="rounded-2xl border border-line bg-white/[0.02] p-5">
       <h3 className="text-[15px] font-medium leading-snug">{paper.title}</h3>
@@ -160,11 +188,7 @@ export function LiteratureWorkspace() {
     }
     try {
       const r = await api.searchLiterature(query, selected, nextPage);
-      setResults((prev) => {
-        if (!append) return r.results;
-        const seen = new Set(prev.flatMap(refsOf));
-        return [...prev, ...r.results.filter((h) => !refsOf(h).some((k) => seen.has(k)))];
-      });
+      setResults((prev) => appendResults(append ? prev : [], r.results));
       setStats((prev) => {
         const next: Record<string, ProviderStatus> = append ? { ...prev } : {};
         for (const st of r.providers) {

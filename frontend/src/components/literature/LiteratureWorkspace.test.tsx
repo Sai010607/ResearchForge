@@ -76,12 +76,49 @@ describe("LiteratureWorkspace", () => {
     expect(screen.getAllByRole("heading", { level: 3 })).toHaveLength(1);
     expect(screen.getAllByText("OpenAlex").length).toBeGreaterThan(0);
     const href = (name: RegExp | string) => screen.getByRole("link", { name }).getAttribute("href");
-    expect(href(/^Open source/)).toBe("https://publisher.example/x");
+    expect(href(/^Open source/)).toBe("https://doi.org/10.1/x");
+    expect(href(/^Publisher page/)).toBe("https://publisher.example/x");
     expect(href(/^DOI/)).toBe("https://doi.org/10.1/x");
     expect(href(/^PubMed/)).toBe("https://pubmed.ncbi.nlm.nih.gov/9/");
     expect(href(/^PMC full text/)).toBe("https://pmc.ncbi.nlm.nih.gov/articles/PMC999/");
     expect(screen.getByRole("link", { name: "DOI: 10.1/x" })).toBeInTheDocument();
     for (const a of screen.getAllByRole("link")) expect(a).toHaveAttribute("rel", "noopener noreferrer");
+  });
+
+  it("Open source prefers DOI, then PMC full text, and uses Europe PMC only as a last resort", async () => {
+    const mk = (id: string, links: { kind: string; label: string; url: string }[]) => ({ ...hit, external_id: id, doi: null, title: `Paper ${id}`, sources: [{ provider: "europepmc", external_id: id }], links });
+    const epmc = { kind: "europepmc", label: "Europe PMC", url: "https://europepmc.org/article/PMC/PMC1" };
+    const pmc = { kind: "pmc", label: "PMC full text", url: "https://pmc.ncbi.nlm.nih.gov/articles/PMC1/" };
+    const doi = { kind: "doi", label: "DOI", url: "https://doi.org/10.1/x" };
+    const pub = { kind: "publisher", label: "Publisher page", url: "https://publisher.example/p" };
+    mocks.search.mockResolvedValue({ query: "q", source: "x", page: 1, warnings: [], providers: [], total_unique: 3, duration_ms: 5,
+      results: [mk("A", [epmc, pmc]), mk("B", [pub, doi]), mk("C", [epmc])] });
+    const user = userEvent.setup();
+    render(<LiteratureWorkspace />);
+    await user.type(screen.getByLabelText("Search publications"), "alzheimer");
+    await user.click(await screen.findByRole("button", { name: "Search" }));
+    await screen.findByText("Paper A");
+    expect(screen.getAllByRole("link", { name: /^Open source/ }).map((a) => a.getAttribute("href"))).toEqual([
+      pmc.url, doi.url, epmc.url,
+    ]);
+  });
+
+  it("Load more merges a paper that is returned again instead of listing it twice", async () => {
+    const dup = { ...hit, doi: "10.4135/x", external_id: "10.4135/x", source: "crossref", title: "What's Deep About Deep Learning?", sources: [{ provider: "crossref", external_id: "10.4135/x" }] };
+    const sameViaOtherProvider = { ...dup, source: "openalex", external_id: "W9", sources: [{ provider: "openalex", external_id: "W9" }] };
+    const base = { query: "q", source: "x", warnings: [], providers: [], total_unique: 1, duration_ms: 5 };
+    mocks.search.mockResolvedValueOnce({ ...base, page: 1, results: [dup] }).mockResolvedValueOnce({ ...base, page: 2, results: [dup, sameViaOtherProvider] });
+    const user = userEvent.setup();
+    render(<LiteratureWorkspace />);
+    await user.type(screen.getByLabelText("Search publications"), "deep learning");
+    await user.click(await screen.findByRole("button", { name: "Search" }));
+    await screen.findByText(dup.title);
+    await user.click(screen.getByRole("button", { name: "Load more" }));
+    await waitFor(() => expect(mocks.search).toHaveBeenCalledTimes(2));
+    await screen.findByText(/unique papers for/);
+    expect(screen.getAllByRole("heading", { level: 3 })).toHaveLength(1);
+    expect(screen.getAllByText("OpenAlex").length).toBeGreaterThan(0); // badge from the merged second record
+    expect(screen.getByText(/unique papers for/)).toHaveTextContent("1 unique papers");
   });
 
   it("Select all / Deselect all / individual selection", async () => {
