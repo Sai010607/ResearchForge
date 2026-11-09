@@ -671,3 +671,18 @@ def test_no_secret_ever_appears_in_provider_errors(client, monkeypatch, settings
     r = client.get("/api/literature/search", params={"q": "alzheimer", "providers": "springer"})
     assert r.status_code == 502 and "TOP-SECRET-KEY" not in r.text
     assert "TOP-SECRET-KEY" not in client.get("/api/literature/providers").text
+
+
+def test_crossref_search_retries_without_select_when_crossref_answers_400(monkeypatch):
+    from app.services import literature
+    calls = []
+
+    def fake(url, params, headers=None):
+        calls.append(dict(params))
+        if "select" in params:
+            raise literature.LiteratureError("The literature source returned HTTP 400.")
+        return {"message": {"items": [{"DOI": "10.1000/x1", "title": ["Alzheimer biomarkers"], "issued": {"date-parts": [[2024]]}}]}}
+    monkeypatch.setattr(literature, "http_get_json", fake)
+    out = discovery.search_crossref("alzheimer", 1, 10)
+    assert [p["doi"] for p in out] == ["10.1000/x1"] and "select" not in calls[1]
+    assert "subtype" not in discovery.CR_SELECT.split(",")

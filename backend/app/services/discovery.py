@@ -17,7 +17,7 @@ from urllib.parse import quote, urlsplit
 
 from app.core.config import get_settings
 from app.services import literature, ranking, verify
-from app.services.literature import LiteratureError, LiteratureNotConfigured, PaperNotFound, _clean, normalize_doi, normalize_pmcid, safe_url
+from app.services.literature import LiteratureError, LiteratureNotConfigured, LiteratureRateLimited, LiteratureTimeout, PaperNotFound, _clean, normalize_doi, normalize_pmcid, safe_url
 
 log = logging.getLogger("researchforge.discovery")
 
@@ -55,7 +55,7 @@ def _year(value: Any) -> int | None:
 
 
 # ----------------------------------------------------------------------------- Crossref
-CR_SELECT = "DOI,title,abstract,author,issued,container-title,is-referenced-by-count,URL,type,subtype,subject,resource"
+CR_SELECT = "DOI,title,abstract,author,issued,container-title,is-referenced-by-count,URL,type,subject,resource"  # "subtype" is not a selectable field: Crossref answers 400
 
 
 def parse_crossref_item(it: dict[str, Any]) -> dict[str, Any] | None:
@@ -87,7 +87,15 @@ def search_crossref(query: str, page: int, per_page: int) -> list[dict[str, Any]
     params: dict[str, Any] = {"query": query, "rows": per_page, "offset": (page - 1) * per_page, "select": CR_SELECT}
     if get_settings().contact_email:
         params["mailto"] = get_settings().contact_email
-    items = ((_get_json(f"{CROSSREF}/works", params) or {}).get("message") or {}).get("items") or []
+    try:
+        data = _get_json(f"{CROSSREF}/works", params)
+    except PaperNotFound:
+        raise
+    except (LiteratureTimeout, LiteratureRateLimited):
+        raise
+    except LiteratureError:  # e.g. HTTP 400 after Crossref changes which fields `select` accepts: retry once with the full record
+        data = _get_json(f"{CROSSREF}/works", {k: v for k, v in params.items() if k != "select"})
+    items = ((data or {}).get("message") or {}).get("items") or []
     return [p for p in (parse_crossref_item(i) for i in items) if p]
 
 
