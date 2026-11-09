@@ -90,3 +90,73 @@ def extract_metadata(title: str, abstract: str | None, keywords: list[str]) -> d
         "methods": _find(METHODS, fields),
         "abstract_available": bool(abstract),
     }
+
+
+# ---------------------------------------------------------------------------------------------------------------
+# Explicit numeric statements (sample sizes, reported metrics). Separate from `extract_metadata` so its output and the API
+# shape built on it are unchanged. Only text that literally states a number is matched; nothing is inferred or summed, and the
+# whole sentence is returned so the number keeps its context (dataset, cohort, validation) instead of floating free.
+# ---------------------------------------------------------------------------------------------------------------
+NUMERIC_METHOD = "rule-based regular expressions on abstract/title (explicit numbers only)"
+_SENTENCE = re.compile(r"(?<=[.!?])\s+(?=[A-Z(])")
+_SAMPLE = re.compile(
+    r"(?:\b[nN]\s*=\s*(?P<n1>\d[\d,]*)\b)|"
+    r"(?:\b(?P<n2>\d[\d,]*)\s+(?:\w+\s+){0,2}?(?P<unit>participants|subjects|patients|individuals|volunteers|controls|cases|scans|images|samples|children|adults|cohort members)\b)",
+    re.IGNORECASE,
+)
+_METRIC_NAMES = {
+    "accuracy": r"accuracy", "AUC": r"auc|auroc|area under the (?:roc )?curve", "sensitivity": r"sensitivity|recall",
+    "specificity": r"specificity", "precision": r"precision", "F1 score": r"f1(?:[- ]score)?", "Dice": r"dice(?: (?:score|coefficient))?",
+    "MAE": r"mae|mean absolute error", "RMSE": r"rmse|root mean square error", "R²": r"r2|r²|r-squared",
+}
+_METRIC = re.compile(
+    r"\b(?P<name>" + "|".join(f"(?P<g{i}>{p})" for i, p in enumerate(_METRIC_NAMES.values())) + r")\b[^0-9.]{0,25}?(?P<value>\d{1,3}(?:\.\d+)?)\s*(?P<unit>%)?",
+    re.IGNORECASE,
+)
+
+
+def _sentence_of(text: str, start: int) -> str:
+    """The sentence of `text` containing offset `start` (exact substring, never rewritten)."""
+    pos = 0
+    for part in _SENTENCE.split(text):
+        end = pos + len(part)
+        i = text.find(part, pos)
+        if i != -1 and i <= start <= i + len(part):
+            return part.strip()
+        pos = max(pos, end)
+    return text[max(0, start - 80): start + 120].strip()
+
+
+def extract_sample_sizes(title: str, abstract: str | None) -> list[dict[str, Any]]:
+    """Explicit participant/sample counts, e.g. 'n = 245' or '1,200 participants'. Each hit keeps its sentence."""
+    out: list[dict[str, Any]] = []
+    seen: set[tuple[str, str]] = set()
+    for field, text in (("title", title or ""), ("abstract", abstract or "")):
+        for m in _SAMPLE.finditer(text):
+            raw = (m.group("n1") or m.group("n2") or "").replace(",", "")
+            if not raw.isdigit() or int(raw) < 2 or int(raw) > 5_000_000:
+                continue
+            unit = (m.group("unit") or "").lower() or None
+            key = (raw, unit or "")
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append({"value": int(raw), "unit": unit, "matched": m.group(0), "sentence": _sentence_of(text, m.start()), "field": field})
+    return out
+
+
+def extract_reported_metrics(title: str, abstract: str | None) -> list[dict[str, Any]]:
+    """Reported metric values, e.g. 'accuracy of 92.3%'. The sentence is kept because a value means nothing without its dataset."""
+    out: list[dict[str, Any]] = []
+    seen: set[tuple[str, str]] = set()
+    for field, text in (("title", title or ""), ("abstract", abstract or "")):
+        for m in _METRIC.finditer(text):
+            idx = next(i for i in range(len(_METRIC_NAMES)) if m.group(f"g{i}"))
+            name = list(_METRIC_NAMES)[idx]
+            value = m.group("value")
+            if (name, value) in seen:
+                continue
+            seen.add((name, value))
+            out.append({"metric": name, "value": value, "unit": m.group("unit") or None, "matched": m.group(0).strip(),
+                        "sentence": _sentence_of(text, m.start()), "field": field})
+    return out

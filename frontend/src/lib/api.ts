@@ -1,5 +1,6 @@
 import type { LoginInput, RegisterInput, SessionInfo } from "@/types/auth";
 import type { IdentifierCheck, LiteratureSearch, Paper, ProviderInfo } from "@/types/paper";
+import type { Claim, ClaimType, Decision, DecisionType, EvidenceRelationship, Gap, GapCategory, MemoryEntry, MemoryEvent, MemoryOverview, MemoryType, Page, RebuildResult, Verification } from "@/types/memory";
 import type { Project, ProjectInput } from "@/types/project";
 
 // NEXT_PUBLIC_API_URL=same-origin makes the browser call /api/... on the site itself (used on Netlify,
@@ -97,7 +98,50 @@ async function request<T>(path: string, init?: RequestInit, canRetry = true): Pr
 const post = <T>(path: string, body?: unknown) =>
   request<T>(path, { method: "POST", body: body === undefined ? undefined : JSON.stringify(body) });
 
+const patch = <T>(path: string, body: unknown) => request<T>(path, { method: "PATCH", body: JSON.stringify(body) });
+const qs = (o: Record<string, string | number | undefined>) => {
+  const p = new URLSearchParams();
+  for (const [k, v] of Object.entries(o)) if (v !== undefined && v !== "") p.set(k, String(v));
+  const s = p.toString();
+  return s ? `?${s}` : "";
+};
+const mem = (projectId: number, tail = "") => `/api/projects/${projectId}/memory${tail}`;
+
+export interface EvidenceInput {
+  paper_id: number;
+  relationship: EvidenceRelationship;
+  evidence_kind?: "quote" | "paraphrase";
+  quoted_text: string;
+  section_name?: string;
+  page_number?: number;
+  source_url?: string;
+}
+
+/** Project research memory (every call is scoped to a project the caller owns). */
+const memory = {
+  overview: (pid: number) => request<MemoryOverview>(mem(pid)),
+  rebuild: (pid: number) => post<RebuildResult>(mem(pid, "/rebuild")),
+  audit: (pid: number, limit = 50, offset = 0) => request<Page<MemoryEvent>>(mem(pid, `/audit${qs({ limit, offset })}`)),
+  entries: (pid: number, f: { memory_type?: MemoryType; verification_status?: Verification; limit?: number; offset?: number } = {}) =>
+    request<Page<MemoryEntry>>(mem(pid, `/entries${qs({ limit: 100, ...f })}`)),
+  createEntry: (pid: number, body: { memory_type: MemoryType; field: string; content: string; paper_id?: number }) => post<MemoryEntry>(mem(pid), body),
+  patchEntry: (pid: number, id: number, body: { verification_status?: "confirmed" | "rejected" | "unverified"; content?: string }) =>
+    patch<MemoryEntry>(mem(pid, `/entries/${id}`), body),
+  claims: (pid: number) => request<Page<Claim>>(mem(pid, `/claims${qs({ limit: 100 })}`)),
+  createClaim: (pid: number, body: { claim_text: string; claim_type: ClaimType; evidence: EvidenceInput[] }) => post<Claim>(mem(pid, "/claims"), body),
+  addEvidence: (pid: number, claimId: number, body: EvidenceInput) => post<Claim>(mem(pid, `/claims/${claimId}/evidence`), body),
+  patchClaim: (pid: number, id: number, status: "active" | "retracted") => patch<Claim>(mem(pid, `/claims/${id}`), { status }),
+  gaps: (pid: number) => request<Page<Gap>>(mem(pid, `/gaps${qs({ limit: 100 })}`)),
+  createGap: (pid: number, body: { title: string; description: string; gap_category: GapCategory; evidence_summary?: string }) => post<Gap>(mem(pid, "/gaps"), body),
+  patchGap: (pid: number, id: number, body: { status?: Gap["status"]; researcher_comment?: string }) => patch<Gap>(mem(pid, `/gaps/${id}`), body),
+  decisions: (pid: number) => request<Page<Decision>>(mem(pid, `/decisions${qs({ limit: 100 })}`)),
+  createDecision: (pid: number, body: { decision_type: DecisionType; description: string; rationale?: string; supersedes_id?: number }) =>
+    post<Decision>(mem(pid, "/decisions"), body),
+  patchDecision: (pid: number, id: number, status: "active" | "rejected") => patch<Decision>(mem(pid, `/decisions/${id}`), { status }),
+};
+
 export const api = {
+  memory,
   health: () => request<{ status: string; database: string }>("/api/health"),
 
   // --- auth / session ---

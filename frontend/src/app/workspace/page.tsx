@@ -1,4 +1,5 @@
 import type { Metadata } from "next";
+import { MemoryPanel } from "@/components/memory/MemoryPanel";
 import { ProjectForm } from "@/components/projects/ProjectForm";
 import { ProjectList } from "@/components/projects/ProjectList";
 import { Reveal } from "@/components/ui/Reveal";
@@ -31,6 +32,8 @@ export default function WorkspacePage() {
             </div>
           </Reveal>
         </div>
+
+        <MemoryPanel />
       </div>
     </div>
   );

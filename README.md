@@ -213,3 +213,7 @@ functional. To add Google later:
 - Verification / reset email never arrives → in development the link is in the **uvicorn console**.
 - `Activate.ps1 cannot be loaded` → `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned`.
 - Port in use → `Get-NetTCPConnection -LocalPort 8000` then `Stop-Process -Id <pid>`.
+
+
+## Project research memory
+See [MEMORY.md](MEMORY.md) for the audit, schema, provenance rules, API and limitations of the project-level research memory.

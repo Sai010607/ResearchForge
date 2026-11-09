@@ -22,10 +22,13 @@ from app.core.database import get_db
 from app.core.errors import api_error
 from app.models import Paper, Project, ProjectPaper
 from app.schemas.paper import PaperRead, ProviderInfo, SavePaper, SearchResponse, VerifyResponse
-from app.services import discovery, literature, verify
+import logging
+
+from app.services import discovery, literature, memory as memory_service, verify
 from app.services.extraction import extract_metadata
 
 router = APIRouter(tags=["literature"])
+log = logging.getLogger(__name__)
 
 
 def _identity_key(identity: Identity) -> str:
@@ -115,6 +118,16 @@ def _upsert_paper(db: Session, data: dict[str, Any]) -> Paper:
     return paper
 
 
+def _update_memory(db: Session, project: Project, paper: Paper) -> None:
+    """Project memory follows the reading list. It is best-effort by design: a failure here must never lose the saved paper."""
+    try:
+        memory_service.on_paper_saved(db, project, paper)
+        db.commit()
+    except Exception:  # noqa: BLE001
+        db.rollback()
+        log.exception("memory update failed for project %s paper %s (paper itself was saved)", project.id, paper.id)
+
+
 def _to_read(p: Paper, project_ids: list[int], cites: list[int]) -> dict[str, Any]:
     links = discovery.build_links({"source": p.source, "external_id": p.external_id, "doi": p.doi, "pmid": p.pmid, "pmcid": p.pmcid,
                                    "arxiv_id": p.arxiv_id, "publisher_url": p.publisher_url, "oa_url": p.oa_url})
@@ -168,6 +181,7 @@ def save_paper(
         except IntegrityError:  # double-click: the link already exists
             db.rollback()
         response.status_code = status.HTTP_201_CREATED
+    _update_memory(db, project, existing)
     return _to_read(existing, [project.id], [])
 
 
@@ -196,6 +210,12 @@ def remove_paper(
         raise api_error(404, "not_found", "Paper not found in this project")
     db.delete(link)
     db.commit()
+    try:
+        memory_service.on_paper_removed(db, project.id, paper_id)
+        db.commit()
+    except Exception:  # noqa: BLE001
+        db.rollback()
+        log.exception("memory cleanup failed for project %s paper %s", project.id, paper_id)
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
