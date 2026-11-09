@@ -13,11 +13,11 @@ from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import Any
-from urllib.parse import quote
+from urllib.parse import quote, urlsplit
 
 from app.core.config import get_settings
-from app.services import literature
-from app.services.literature import LiteratureError, LiteratureNotConfigured, PaperNotFound, _clean, normalize_doi, normalize_pmcid
+from app.services import literature, ranking, verify
+from app.services.literature import LiteratureError, LiteratureNotConfigured, PaperNotFound, _clean, normalize_doi, normalize_pmcid, safe_url
 
 log = logging.getLogger("researchforge.discovery")
 
@@ -26,7 +26,7 @@ EUTILS = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils"
 ARXIV = "https://export.arxiv.org/api/query"
 S2 = "https://api.semanticscholar.org/graph/v1"
 SPRINGER = "https://api.springernature.com"
-S2_FIELDS = "title,abstract,year,venue,authors,externalIds,citationCount,url,referenceCount"
+S2_FIELDS = "title,abstract,year,venue,authors,externalIds,citationCount,url,referenceCount,publicationTypes,openAccessPdf"
 DOI_RE = re.compile(r"10\.\d{4,9}/\S{1,150}")
 ARXIV_RE = re.compile(r"\d{4}\.\d{4,5}(v\d+)?|[a-z\-]+(\.[A-Za-z]{2})?/\d{7}(v\d+)?")
 
@@ -55,7 +55,7 @@ def _year(value: Any) -> int | None:
 
 
 # ----------------------------------------------------------------------------- Crossref
-CR_SELECT = "DOI,title,abstract,author,issued,container-title,is-referenced-by-count,URL,type,subject,resource"
+CR_SELECT = "DOI,title,abstract,author,issued,container-title,is-referenced-by-count,URL,type,subtype,subject,resource"
 
 
 def parse_crossref_item(it: dict[str, Any]) -> dict[str, Any] | None:
@@ -71,7 +71,8 @@ def parse_crossref_item(it: dict[str, Any]) -> dict[str, Any] | None:
             authors.append(name)
     return {
         "source": "crossref", "external_id": doi, "doi": doi, "pmid": None, "pmcid": None,
-        "publisher_url": ((it.get("resource") or {}).get("primary") or {}).get("URL"),
+        "publisher_url": safe_url(((it.get("resource") or {}).get("primary") or {}).get("URL")), "oa_url": None,
+        "pub_types": [t for t in (it.get("type"), it.get("subtype")) if isinstance(t, str)],
         "title": title, "abstract": _clean(it.get("abstract")),
         "year": parts[0] if parts and isinstance(parts[0], int) else None,
         "venue": (it.get("container-title") or [None])[0],
@@ -135,8 +136,10 @@ def parse_pubmed_xml(xml: str) -> list[dict[str, Any]]:
         year = _year(_text(pd.find("Year")) or _text(pd.find("MedlineDate"))) if pd is not None else None
         mesh = [_text(m) for m in art.findall("MedlineCitation/MeshHeadingList/MeshHeading/DescriptorName")]
         kws = [_text(k) for k in art.findall("MedlineCitation/KeywordList/Keyword")]
+        ptypes = [t for t in (_text(x) for x in art.findall("MedlineCitation/Article/PublicationTypeList/PublicationType")) if t]
         out.append({
-            "source": "pubmed", "external_id": pmid, "doi": doi, "pmid": pmid, "pmcid": pmcid, "publisher_url": None, "title": title,
+            "source": "pubmed", "external_id": pmid, "doi": doi, "pmid": pmid, "pmcid": pmcid, "publisher_url": None, "oa_url": None,
+            "pub_types": ptypes, "title": title,
             "abstract": " ".join(parts) or None, "year": year,
             "venue": _text(art.find("MedlineCitation/Article/Journal/Title")),
             "authors": authors[:30], "url": f"https://pubmed.ncbi.nlm.nih.gov/{pmid}/",
@@ -195,7 +198,7 @@ def parse_arxiv_atom(xml: str) -> list[dict[str, Any]]:
         aid = re.sub(r"v\d+$", "", m.group(1))
         doi = normalize_doi(_text(e.find(f"{_X}doi")))
         out.append({
-            "source": "arxiv", "external_id": aid, "doi": doi, "pmid": None, "pmcid": None, "publisher_url": None, "arxiv_id": aid.lower(),
+            "source": "arxiv", "external_id": aid, "doi": doi, "pmid": None, "pmcid": None, "publisher_url": None, "oa_url": None, "pub_types": ["preprint"], "arxiv_id": aid.lower(),
             "title": title, "abstract": _text(e.find(f"{_A}summary")), "year": _year(_text(e.find(f"{_A}published"))),
             "venue": _text(e.find(f"{_X}journal_ref")) or "arXiv preprint",
             "authors": [n for n in (_text(a.find(f"{_A}name")) for a in e.findall(f"{_A}author")) if n][:30],
@@ -232,7 +235,8 @@ def parse_s2_paper(w: dict[str, Any]) -> dict[str, Any] | None:
     return {
         "source": "semanticscholar", "external_id": pid, "doi": normalize_doi(ids.get("DOI")),
         "pmid": str(ids["PubMed"]) if ids.get("PubMed") else None, "pmcid": normalize_pmcid(ids.get("PubMedCentral")),
-        "publisher_url": None, "arxiv_id": arxiv.lower() if arxiv else None,
+        "publisher_url": None, "oa_url": safe_url((w.get("openAccessPdf") or {}).get("url")),
+        "pub_types": [t for t in (w.get("publicationTypes") or []) if isinstance(t, str)], "arxiv_id": arxiv.lower() if arxiv else None,
         "title": title, "abstract": _clean(w.get("abstract")), "year": w.get("year"), "venue": w.get("venue") or None,
         "authors": [a["name"] for a in (w.get("authors") or []) if a.get("name")][:30],
         "url": w.get("url") or f"https://www.semanticscholar.org/paper/{pid}",
@@ -288,14 +292,22 @@ def parse_springer_record(r: dict[str, Any]) -> dict[str, Any] | None:
     page = None
     for u in r.get("url") or []:
         v = u.get("value") if isinstance(u, dict) else None
-        if v and not re.match(r"https?://(dx\.)?doi\.org/", v):
+        if v and (u.get("format") or "html") in ("html", "") and not re.match(r"https?://(dx\.)?doi\.org/", v):
             page = v
             break
     if page and page.startswith("http://") and any(h in page.split("/")[2] for h in _SPRINGER_HTTPS_HOSTS):
         page = "https://" + page[len("http://"):]
+    page = safe_url(page)
     kws = r.get("keyword") or r.get("subjects") or []
+    # Real Meta v2 records carry space-separated strings, e.g. contentType "Chapter ConferencePaper", genre "OriginalPaper Proceedings".
+    # `publicationType` describes the HOST publication (a chapter's is "Book"), so it is not used.
+    ptypes = [t for field in (r.get("contentType"), r.get("genre")) for t in (field if isinstance(field, list) else str(field or "").split()) if isinstance(t, str)]
+    if "ConferencePaper" in ptypes:  # a conference paper published as a book chapter is reported as the conference paper
+        ptypes = [t for t in ptypes if t not in ("Chapter", "OriginalPaper")]
     return {
         "source": "springer", "external_id": doi, "doi": doi, "pmid": None, "pmcid": None, "publisher_url": page,
+        "oa_url": page if str(r.get("openaccess")).lower() == "true" else None,  # Springer says this record is open access: its own page is the full text
+        "pub_types": ptypes,
         "title": title, "abstract": _springer_text(r.get("abstract")), "year": _year(r.get("publicationDate")),
         "venue": r.get("publicationName") or None, "authors": authors[:30], "url": page or f"https://doi.org/{doi}",
         "cited_by_count": None, "keywords": [k for k in kws if isinstance(k, str)][:15], "reference_ids": [],
@@ -395,27 +407,50 @@ def fetch_paper(source: str, external_id: str) -> dict[str, Any]:
     p = BY_ID.get(source)
     if p is None:
         raise PaperNotFound("Unknown source.")
-    return p.fetch(external_id)
+    rec = p.fetch(external_id)
+    rec["publication_type"] = verify.classify_publication(rec.get("pub_types") or [], rec.get("doi"), [rec["source"]])
+    return rec
 
 
 # ----------------------------------------------------------------------------- links
-def build_links(p: dict[str, Any]) -> list[dict[str, str]]:
-    """Every link is built from an identifier the source supplied, so it points at that exact record.
+# Hosts that are indexes, aggregators or repositories. A URL there is never labelled "Publisher page": the record has its own
+# DOI / PubMed / PMC / arXiv / source link built from identifiers.
+_NOT_PUBLISHER = ("doi.org", "ncbi.nlm.nih.gov", "europepmc.org", "arxiv.org", "semanticscholar.org", "openalex.org", "researchgate.net",
+                  "academia.edu", "scholar.archive.org", "core.ac.uk", "base-search.net", "worldcat.org")
 
-    Kinds: publisher (landing page given by the source), doi, pubmed, pmc, arxiv, europepmc,
-    openalex, semanticscholar. Duplicated URLs are dropped.
+
+def _host(url: str) -> str:
+    return urlsplit(url).netloc.lower().split(":")[0]
+
+
+def _is_publisher_url(url: str) -> bool:
+    h = _host(url)
+    if not h or h.startswith("scholar.google."):
+        return False
+    return not any(h == d or h.endswith("." + d) for d in _NOT_PUBLISHER if not d.endswith("."))
+
+
+def build_links(p: dict[str, Any]) -> list[dict[str, Any]]:
+    """Every link is built from an identifier a source supplied, so it points at that exact record.
+
+    Kinds: fulltext (open-access copy), pmc, publisher (page given by the source), doi, pubmed, arxiv, europepmc, openalex,
+    semanticscholar. Duplicated URLs are dropped. Only http(s) URLs are ever emitted.
     """
     refs = {(r["provider"], r["external_id"]) for r in p.get("sources") or []} | {(p["source"], p["external_id"])}
     out: list[tuple[str, str, str]] = []
-    pub = p.get("publisher_url") or ""
-    if pub and not re.match(r"https?://(dx\.)?doi\.org/", pub):  # a doi.org URL is the DOI link, not a publisher page
-        out.append(("publisher", "Publisher page", p["publisher_url"]))
+    pmcid = p.get("pmcid")
+    if pmcid and re.fullmatch(r"PMC\d{1,10}", pmcid):
+        out.append(("pmc", "PMC full text", f"https://pmc.ncbi.nlm.nih.gov/articles/{pmcid}/"))
+    oa = safe_url(p.get("oa_url"))
+    if oa:
+        out.append(("fulltext", "Open-access full text", oa))
+    pub = safe_url(p.get("publisher_url"))
+    if pub and _is_publisher_url(pub):
+        out.append(("publisher", "Publisher page", pub))
     if p.get("doi"):
         out.append(("doi", "DOI", f"https://doi.org/{quote(p['doi'], safe='/()-._~:;@')}"))
-    if p.get("pmid"):
+    if p.get("pmid") and re.fullmatch(r"\d{1,9}", str(p["pmid"])):
         out.append(("pubmed", "PubMed", f"https://pubmed.ncbi.nlm.nih.gov/{p['pmid']}/"))
-    if p.get("pmcid"):
-        out.append(("pmc", "PMC full text", f"https://pmc.ncbi.nlm.nih.gov/articles/{p['pmcid']}/"))
     aid = _arxiv_id(p)
     if aid:
         out.append(("arxiv", "arXiv", f"https://arxiv.org/abs/{aid}"))
@@ -429,6 +464,27 @@ def build_links(p: dict[str, Any]) -> list[dict[str, str]]:
             out.append(("semanticscholar", "Semantic Scholar", f"https://www.semanticscholar.org/paper/{eid}"))
     seen: set[str] = set()
     return [{"kind": k, "label": lab, "url": u} for k, lab, u in out if not (u in seen or seen.add(u))]
+
+
+# What each link kind gives the reader, best access first. Used to pick the one primary action.
+_ACCESS = {"pmc": "full_text", "fulltext": "full_text", "arxiv": "full_text", "publisher": "publisher", "doi": "publisher",
+           "pubmed": "abstract", "openalex": "record", "semanticscholar": "record", "europepmc": "record"}
+_LABEL = {"pmc": "Read full text (PMC)", "fulltext": "Read open-access full text", "arxiv": "Read preprint copy (arXiv)", "publisher": "Open at publisher",
+          "doi": "Open at publisher (DOI)", "pubmed": "View abstract on PubMed", "openalex": "View record (OpenAlex)",
+          "semanticscholar": "View record (Semantic Scholar)", "europepmc": "View record (Europe PMC)"}
+# DOI before the source-supplied publisher page: the DOI is the registrant's own pointer; a landing URL copied by an aggregator can go stale.
+_PRIMARY_ORDER = ("pmc", "fulltext", "arxiv", "doi", "publisher", "pubmed", "openalex", "semanticscholar", "europepmc")
+
+
+def primary_link(links: list[dict[str, Any]], publication_type: str | None = None) -> dict[str, str] | None:
+    """The single "open" action: free full text when a source supplies it, then the publisher (via the publisher page or DOI), then
+    abstract pages. Europe PMC pages come last because they can fail for very new records. A preprint's arXiv page IS its full text."""
+    by = {l["kind"]: l for l in links}
+    for kind in _PRIMARY_ORDER:
+        if kind in by:
+            label = "Read on arXiv" if kind == "arxiv" and publication_type == "preprint" else _LABEL[kind]
+            return {"kind": kind, "url": by[kind]["url"], "access": _ACCESS[kind], "label": label}
+    return None
 
 
 # ----------------------------------------------------------------------------- merge / dedupe
@@ -447,19 +503,24 @@ def _arxiv_id(p: dict[str, Any]) -> str | None:
     return re.sub(r"v\d+$", "", m.group(1)) if m else None
 
 
-def _is_preprint(members: list[dict[str, Any]]) -> bool:
-    for p in members:
-        doi = p.get("doi") or ""
-        if p["source"] == "arxiv" or str(p["external_id"]).startswith("PPR:") or doi.startswith(("10.48550/", "10.21203/")):
-            return True
-    return False
+_ID_LABELS = {"doi": "DOI", "pmid": "PMID", "pmcid": "PMCID", "arxiv": "arXiv id"}
+_MIN_TITLE_OVERLAP = 0.34  # records sharing an identifier whose titles share fewer words than this are different publications
+
+
+def _identity(p: dict[str, Any]) -> dict[str, str]:
+    ids = {"doi": p.get("doi"), "pmid": str(p["pmid"]) if p.get("pmid") else None, "pmcid": p.get("pmcid"), "arxiv": (_arxiv_id(p) or "").lower() or None}
+    return {k: v for k, v in ids.items() if v}
 
 
 def merge_results(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Group records that describe the same paper and merge them, preserving provenance.
 
-    Identity, strongest first: DOI, PMID, arXiv id. Weakest (lower confidence): identical normalised
-    title (>= 25 chars) AND same year AND overlapping first-author name. Title alone never merges.
+    Identity, strongest first: DOI, PMID, PMCID, arXiv id. Weakest (lower confidence): identical normalised title (>= 25 chars)
+    AND same year AND overlapping first-author name. Title alone never merges.
+
+    Records are NEVER merged when they carry conflicting identifiers (e.g. same DOI but different PMIDs; a preprint DOI versus the
+    journal DOI), or when a shared identifier sits on clearly different titles/years. The conflict is reported on the result's
+    `verification` instead of being resolved silently.
     """
     parent = list(range(len(items)))
 
@@ -469,17 +530,41 @@ def merge_results(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
             i = parent[i]
         return i
 
+    gids = [_identity(p) for p in items]  # identifiers of each group, by root
+    conflicts: dict[int, list[str]] = {}
+
+    def flag(i: int, j: int, msg: str) -> None:
+        for k in (i, j):
+            conflicts.setdefault(k, [])
+            if msg not in conflicts[k]:
+                conflicts[k].append(msg)
+
+    def union(i: int, j: int, strong: bool) -> None:
+        ri, rj = find(i), find(j)
+        if ri == rj:
+            return
+        for t in _ID_LABELS:
+            a, b = gids[ri].get(t), gids[rj].get(t)
+            if a and b and a != b:
+                preprint_vs_published = t == "doi" and any(x.startswith("10.48550/arxiv.") for x in (a, b))
+                if strong and not preprint_vs_published:  # a preprint and its journal version legitimately have two DOIs: kept apart, not an error
+                    flag(i, j, f"Another record shares an identifier with this one but has a different {_ID_LABELS[t]} ({a} vs {b}), so they were not merged.")
+                return
+        if strong:
+            yi, yj = items[i].get("year"), items[j].get("year")
+            if verify.title_overlap(items[i]["title"], items[j]["title"]) < _MIN_TITLE_OVERLAP:
+                flag(i, j, "Another record shares an identifier with this one but has a clearly different title, so they were not merged.")
+                return
+            if yi and yj and abs(yi - yj) > 2:
+                flag(i, j, f"Another record shares an identifier with this one but is from a different year ({yj} vs {yi}), so they were not merged.")
+                return
+        parent[rj] = ri
+        for t, v in gids[rj].items():
+            gids[ri].setdefault(t, v)
+
     owner: dict[tuple[str, str], int] = {}
     for i, p in enumerate(items):
-        keys: list[tuple[str, str]] = []
-        if p.get("doi"):
-            keys.append(("doi", p["doi"]))
-        if p.get("pmid"):
-            keys.append(("pmid", str(p["pmid"])))
-        if p.get("pmcid"):
-            keys.append(("pmcid", p["pmcid"]))
-        if _arxiv_id(p):
-            keys.append(("arxiv", _arxiv_id(p) or ""))
+        keys: list[tuple[str, str]] = [(t, v) for t, v in _identity(p).items()]
         nt = _norm_title(p["title"])
         if len(nt) >= 25 and p.get("year") and p.get("authors"):
             keys.append(("weak", f"{nt}|{p['year']}"))
@@ -488,7 +573,7 @@ def merge_results(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 j = owner[k]
                 if k[0] == "weak" and not (_author_tokens(items[j]["authors"]) & _author_tokens(p["authors"])):
                     continue
-                parent[find(i)] = find(j)
+                union(i, j, strong=k[0] != "weak")
             else:
                 owner[k] = i
     groups: dict[int, list[int]] = {}
@@ -498,9 +583,9 @@ def merge_results(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
     merged: list[tuple[int, dict[str, Any]]] = []
     for idxs in groups.values():
         members = sorted((items[i] for i in idxs), key=lambda p: PRIORITY.get(p["source"], 99))
-        out = {k: v for k, v in members[0].items() if k != "arxiv_id"}
+        out = {k: v for k, v in members[0].items() if k not in ("arxiv_id", "_ranks")}
         for m in members[1:]:
-            for f in ("abstract", "doi", "pmid", "pmcid", "publisher_url", "year", "venue", "url", "cited_by_count"):
+            for f in ("abstract", "doi", "pmid", "pmcid", "publisher_url", "oa_url", "year", "venue", "url", "cited_by_count"):
                 if out.get(f) in (None, "", []):
                     out[f] = m.get(f)
             if not out.get("authors"):
@@ -510,20 +595,40 @@ def merge_results(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
             out["keywords"] = list(dict.fromkeys([*out.get("keywords", []), *(m.get("keywords") or [])]))[:15]
         out["arxiv_id"] = next((a for a in (_arxiv_id(m) for m in members) if a), None)
         out["sources"] = list({(m["source"], m["external_id"]): {"provider": m["source"], "external_id": m["external_id"]} for m in members}.values())
-        out["preprint"] = _is_preprint(members)
+        out["pub_types"] = list(dict.fromkeys(t for m in members for t in (m.get("pub_types") or [])))
+        out["publication_type"] = _group_type(members)
+        out["preprint"] = out["publication_type"] == "preprint"
+        out["_ranks"] = {}
+        for m in members:
+            for prov, r in (m.get("_ranks") or {}).items():
+                out["_ranks"][prov] = min(r, out["_ranks"].get(prov, r))
         out["links"] = build_links(out)
+        out["primary_link"] = primary_link(out["links"], out["publication_type"])
+        notes = list(dict.fromkeys(msg for i in idxs for msg in conflicts.get(i, [])))
+        out["verification"] = verify.cross_check(members, out, notes)
         merged.append((min(idxs), out))
     return [p for _, p in sorted(merged, key=lambda t: t[0])]
 
 
+def _group_type(members: list[dict[str, Any]]) -> str:
+    """One type for a merged paper. A journal/review/conference record outranks a preprint copy of the same DOI (it is the published
+    version); a preprint is reported only when no member says the paper was published."""
+    types = [verify.classify_publication(m.get("pub_types") or [], m.get("doi"), [m["source"]]) for m in members]
+    published = [t for t in verify._SPECIFICITY if t != "preprint" and t in types]
+    if published:
+        return published[0]
+    return "preprint" if "preprint" in types else "unknown"
+
+
 # ----------------------------------------------------------------------------- orchestration
 def search_all(query: str, provider_ids: list[str], page: int, per_page: int = 10) -> dict[str, Any]:
-    """Run the chosen providers concurrently. Returns results, per-provider status, unique count, duration."""
+    """Run the chosen providers concurrently. Returns results (ranked by unified relevance), per-provider status, unique count, duration."""
     chosen = [BY_ID[i] for i in provider_ids if i in BY_ID]
     t0 = time.perf_counter()
 
     def run(p: Provider) -> tuple[list[dict[str, Any]], dict[str, Any]]:
         start = time.perf_counter()
+        literature.reset_request_stats()
         try:
             res = p.search(query, page, per_page)
             err, kind = None, None
@@ -532,22 +637,26 @@ def search_all(query: str, provider_ids: list[str], page: int, per_page: int = 1
         except Exception:  # an adapter bug must never take down the other providers
             log.exception("provider %s failed unexpectedly", p.id)
             res, err, kind = [], "Unexpected error while reading this source.", "error"
+        requests, retries = literature.request_stats()
         return res, {"provider": p.id, "name": p.name, "ok": err is None, "count": len(res), "error": err, "error_kind": kind,
-                     "duration_ms": int((time.perf_counter() - start) * 1000)}
+                     "duration_ms": int((time.perf_counter() - start) * 1000), "requests": requests, "retries": retries}
 
     with ThreadPoolExecutor(max_workers=max(1, len(chosen))) as pool:
         outcomes = list(pool.map(run, chosen))
     statuses = [st for _, st in outcomes]
     if chosen and not any(st["ok"] for st in statuses):
         raise LiteratureError(" ".join(f"{st['name']}: {st['error']}" for st in statuses))
-    # interleave by rank so each provider's best hits surface early
     flat: list[dict[str, Any]] = []
     depth = max((len(r) for r, _ in outcomes), default=0)
-    for rank in range(depth):
-        for r, _ in outcomes:
+    for rank in range(depth):  # provider order breaks ties; the final order comes from `ranking.rank`
+        for (r, st) in outcomes:
             if rank < len(r):
-                flat.append(r[rank])
-    results = merge_results(flat)
+                flat.append({**r[rank], "_ranks": {st["provider"]: rank + 1}})
+    n_ok = max(1, sum(1 for st in statuses if st["ok"]))
+    results = ranking.rank(query, merge_results(flat), n_providers=n_ok)
+    for r in results:
+        r.pop("_ranks", None)
+        r.pop("pub_types", None)
     return {
         "results": results, "providers": statuses, "total_unique": len(results),
         "duration_ms": int((time.perf_counter() - t0) * 1000),

@@ -21,8 +21,8 @@ from app.core.config import get_settings
 from app.core.database import get_db
 from app.core.errors import api_error
 from app.models import Paper, Project, ProjectPaper
-from app.schemas.paper import PaperRead, ProviderInfo, SavePaper, SearchResponse
-from app.services import discovery, literature
+from app.schemas.paper import PaperRead, ProviderInfo, SavePaper, SearchResponse, VerifyResponse
+from app.services import discovery, literature, verify
 from app.services.extraction import extract_metadata
 
 router = APIRouter(tags=["literature"])
@@ -70,6 +70,26 @@ def search_literature(
     return {"query": q.strip(), "source": ",".join(ids), "page": page, **out}
 
 
+@router.get("/api/literature/verify", response_model=VerifyResponse)
+def verify_paper(
+    source: str = Query(max_length=20),
+    external_id: str = Query(min_length=3, max_length=200),
+    identity: Identity = Depends(require_identity),
+) -> dict[str, Any]:
+    """Deep identifier check: re-fetch the record from its provider, then ask each identifier's registry about it
+    (Crossref for the DOI, PubMed for the PMID, the NCBI ID converter for PMCID<->PMID<->DOI, arXiv for the arXiv id)."""
+    if source not in discovery.BY_ID:
+        raise api_error(422, "unknown_provider", f"Unknown provider: {source}")
+    rate_limit.check("lit-verify", _identity_key(identity), 60, 3600)
+    try:
+        paper = discovery.fetch_paper(source, external_id)
+    except literature.PaperNotFound as exc:
+        raise api_error(404, "paper_not_found", str(exc))
+    except literature.LiteratureError as exc:
+        raise api_error(502, "literature_unavailable", str(exc))
+    return {"source": source, "external_id": external_id, **verify.check_identifiers(paper)}
+
+
 def _upsert_paper(db: Session, data: dict[str, Any]) -> Paper:
     def find() -> Paper | None:
         paper = db.scalar(select(Paper).where(Paper.source == data["source"], Paper.external_id == data["external_id"]))
@@ -81,7 +101,8 @@ def _upsert_paper(db: Session, data: dict[str, Any]) -> Paper:
     if paper is not None:
         return paper
     extracted = extract_metadata(data["title"], data.get("abstract"), data.get("keywords") or [])
-    fields = {k: v for k, v in data.items() if k not in ("sources", "preprint", "links")}
+    columns = {c.name for c in Paper.__table__.columns} - {"id", "fetched_at", "extracted"}
+    fields = {k: v for k, v in data.items() if k in columns}  # search-only fields (links, relevance, verification...) are never stored
     paper = Paper(**fields, extracted=extracted)
     db.add(paper)
     try:
@@ -95,10 +116,12 @@ def _upsert_paper(db: Session, data: dict[str, Any]) -> Paper:
 
 
 def _to_read(p: Paper, project_ids: list[int], cites: list[int]) -> dict[str, Any]:
+    links = discovery.build_links({"source": p.source, "external_id": p.external_id, "doi": p.doi, "pmid": p.pmid, "pmcid": p.pmcid,
+                                   "arxiv_id": p.arxiv_id, "publisher_url": p.publisher_url, "oa_url": p.oa_url})
     return {
         "id": p.id, "source": p.source, "external_id": p.external_id, "doi": p.doi, "pmid": p.pmid, "pmcid": p.pmcid,
-        "arxiv_id": p.arxiv_id, "publisher_url": p.publisher_url,
-        "links": discovery.build_links({"source": p.source, "external_id": p.external_id, "doi": p.doi, "pmid": p.pmid, "pmcid": p.pmcid, "arxiv_id": p.arxiv_id, "publisher_url": p.publisher_url}),
+        "arxiv_id": p.arxiv_id, "publisher_url": p.publisher_url, "oa_url": p.oa_url, "publication_type": p.publication_type,
+        "preprint": p.publication_type == "preprint", "links": links, "primary_link": discovery.primary_link(links, p.publication_type),
         "title": p.title, "abstract": p.abstract, "year": p.year, "venue": p.venue, "authors": p.authors,
         "url": p.url, "cited_by_count": p.cited_by_count, "keywords": p.keywords, "extracted": p.extracted,
         "project_ids": project_ids, "cites": cites,

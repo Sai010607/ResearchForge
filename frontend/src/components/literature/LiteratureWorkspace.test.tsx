@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { project } from "@/test/helpers";
@@ -29,7 +29,8 @@ beforeEach(() => {
   const info = (id: string, name: string, group: string, on = true) => ({ id, name, group, requires_key: false, supports_key: false, key_configured: false, default_enabled: on, supports_full_text: false, rate_limit: "", docs: "", env_var: null });
   mocks.providers.mockResolvedValue([info("openalex", "OpenAlex", "general"), info("pubmed", "PubMed", "biomedical"), info("arxiv", "arXiv", "cs"), info("semanticscholar", "Semantic Scholar", "cs", false), { ...info("springer", "Springer Nature", "general", false), requires_key: true, supports_key: true, key_configured: false, env_var: "SPRINGER_API_KEY" }]);
   mocks.search.mockResolvedValue({
-    query: "q", source: "openalex,pubmed,arxiv", page: 1, results: [{ ...hit, pmcid: "PMC999", sources: [{ provider: "openalex", external_id: "W1" }, { provider: "pubmed", external_id: "9" }], links: [
+    query: "q", source: "openalex,pubmed,arxiv", page: 1, results: [{ ...hit, pmcid: "PMC999", sources: [{ provider: "openalex", external_id: "W1" }, { provider: "pubmed", external_id: "9" }],
+      primary_link: { kind: "pmc", label: "Read full text (PMC)", access: "full_text", url: "https://pmc.ncbi.nlm.nih.gov/articles/PMC999/" }, links: [
       { kind: "publisher", label: "Publisher page", url: "https://publisher.example/x" },
       { kind: "doi", label: "DOI", url: "https://doi.org/10.1/x" },
       { kind: "pubmed", label: "PubMed", url: "https://pubmed.ncbi.nlm.nih.gov/9/" },
@@ -58,8 +59,10 @@ describe("LiteratureWorkspace", () => {
     expect(screen.getAllByText("PubMed").length).toBeGreaterThan(0);
     expect(screen.getByText("No abstract provided by the source.")).toBeInTheDocument();
     expect(screen.getByText("arXiv: arXiv is down")).toBeInTheDocument();
-    expect(screen.getByText("arXiv: timed out")).toBeInTheDocument();
-    expect(screen.getByText("PubMed: 1")).toBeInTheDocument();
+    const status = within(screen.getByRole("list", { name: "Source status" }));
+    const rows = status.getAllByRole("listitem").map((li) => li.textContent);
+    expect(rows.some((t) => t?.startsWith("arXiv: timed out · 0.1 s"))).toBe(true);
+    expect(rows.some((t) => t === "PubMed: 1 record · 0.9 s")).toBe(true);
     expect(screen.getByText(/unique papers for/)).toHaveTextContent("1 unique papers for “alzheimer” · page 1 · 1.5 s");
     expect(screen.getByTitle(/matched “T1” in the title/)).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "Add to project" }));
@@ -76,16 +79,16 @@ describe("LiteratureWorkspace", () => {
     expect(screen.getAllByRole("heading", { level: 3 })).toHaveLength(1);
     expect(screen.getAllByText("OpenAlex").length).toBeGreaterThan(0);
     const href = (name: RegExp | string) => screen.getByRole("link", { name }).getAttribute("href");
-    expect(href(/^Open source/)).toBe("https://doi.org/10.1/x");
+    expect(href(/^Read full text \(PMC\)/)).toBe("https://pmc.ncbi.nlm.nih.gov/articles/PMC999/"); // server-chosen primary action
     expect(href(/^Publisher page/)).toBe("https://publisher.example/x");
-    expect(href(/^DOI/)).toBe("https://doi.org/10.1/x");
+    expect(href(/^DOI$/)).toBe("https://doi.org/10.1/x");
     expect(href(/^PubMed/)).toBe("https://pubmed.ncbi.nlm.nih.gov/9/");
-    expect(href(/^PMC full text/)).toBe("https://pmc.ncbi.nlm.nih.gov/articles/PMC999/");
-    expect(screen.getByRole("link", { name: "DOI: 10.1/x" })).toBeInTheDocument();
+    expect(href(/^PMC full text PMC999/)).toBe("https://pmc.ncbi.nlm.nih.gov/articles/PMC999/");
+    expect(screen.getByText("10.1/x")).toBeInTheDocument(); // the DOI itself is shown as text
     for (const a of screen.getAllByRole("link")) expect(a).toHaveAttribute("rel", "noopener noreferrer");
   });
 
-  it("Open source prefers DOI, then PMC full text, and uses Europe PMC only as a last resort", async () => {
+  it("without a server-chosen primary link the card falls back to PMC, then DOI, and Europe PMC only as a last resort", async () => {
     const mk = (id: string, links: { kind: string; label: string; url: string }[]) => ({ ...hit, external_id: id, doi: null, title: `Paper ${id}`, sources: [{ provider: "europepmc", external_id: id }], links });
     const epmc = { kind: "europepmc", label: "Europe PMC", url: "https://europepmc.org/article/PMC/PMC1" };
     const pmc = { kind: "pmc", label: "PMC full text", url: "https://pmc.ncbi.nlm.nih.gov/articles/PMC1/" };
@@ -98,9 +101,8 @@ describe("LiteratureWorkspace", () => {
     await user.type(screen.getByLabelText("Search publications"), "alzheimer");
     await user.click(await screen.findByRole("button", { name: "Search" }));
     await screen.findByText("Paper A");
-    expect(screen.getAllByRole("link", { name: /^Open source/ }).map((a) => a.getAttribute("href"))).toEqual([
-      pmc.url, doi.url, epmc.url,
-    ]);
+    const primaries = [...document.querySelectorAll("a[data-primary]")].map((a) => a.getAttribute("href"));
+    expect(primaries).toEqual([pmc.url, doi.url, epmc.url]);
   });
 
   it("Load more merges a paper that is returned again instead of listing it twice", async () => {
@@ -206,6 +208,85 @@ describe("LiteratureWorkspace", () => {
     await user.click(screen.getByRole("tab", { name: /Saved \(1\)/ }));
     await user.click(screen.getByRole("button", { name: /Remove Hippocampal/ }));
     expect(mocks.remove).toHaveBeenCalledWith(project.id, 5);
+  });
+
+  it("shows the publication type, the verification badge and match explanation on a card", async () => {
+    const rich = { ...hit, publication_type: "review", relevance: 0.6, match: { terms: 4, terms_found: 3, missing_terms: ["biomarker"], in_title: 2, exact_title: false, phrase_found: true },
+      verification: { status: "cross_checked", sources_agreeing: 3, checks: [{ id: "title", status: "pass", detail: "Titles agree across sources." }] } };
+    mocks.search.mockResolvedValue({ query: "q", source: "x", page: 1, warnings: [], providers: [], total_unique: 1, duration_ms: 5, results: [rich, { ...hit, external_id: "W2", doi: "10.1/y", title: "Other", publication_type: "book_chapter" }, { ...hit, external_id: "W3", doi: "10.1/z", title: "Third", publication_type: "unknown" }] });
+    const user = userEvent.setup();
+    render(<LiteratureWorkspace />);
+    await user.type(screen.getByLabelText("Search publications"), "alzheimer");
+    await user.click(await screen.findByRole("button", { name: "Search" }));
+    await screen.findByText(hit.title);
+    expect(screen.getByText("Review article")).toBeInTheDocument();
+    expect(screen.getByText("Book chapter")).toBeInTheDocument();
+    expect(screen.getByText("Type not stated")).toBeInTheDocument();
+    expect(screen.getByText(/Matches 3 of 4 search terms/)).toHaveTextContent("missing: biomarker");
+    await user.click(screen.getByRole("button", { name: /Cross-checked · 3/ }));
+    expect(screen.getByText("Titles agree across sources.")).toBeInTheDocument();
+  });
+
+  it("flags an identifier conflict instead of hiding it", async () => {
+    const conflict = { ...hit, verification: { status: "conflict", sources_agreeing: 1, checks: [{ id: "identifier_conflict", status: "fail", detail: "Another record shares an identifier with this one but has a different PMID (1 vs 2), so they were not merged." }] } };
+    mocks.search.mockResolvedValue({ query: "q", source: "x", page: 1, warnings: [], providers: [], total_unique: 1, duration_ms: 5, results: [conflict] });
+    const user = userEvent.setup();
+    render(<LiteratureWorkspace />);
+    await user.type(screen.getByLabelText("Search publications"), "alzheimer");
+    await user.click(await screen.findByRole("button", { name: "Search" }));
+    await user.click(await screen.findByRole("button", { name: /Identifier conflict/ }));
+    expect(screen.getByText(/so they were not merged/)).toBeInTheDocument();
+  });
+
+  it("checks identifiers online on request and reports the registries' answer", async () => {
+    const verify = vi.fn().mockResolvedValue({ source: "openalex", external_id: "W1", status: "conflict", checks: [{ id: "pmcid_pmid", status: "fail", detail: "PMC maps PMC999 to PMID 7, not 9." }, { id: "doi_title", status: "pass", detail: "Crossref title matches." }] });
+    const apiMod = await import("@/lib/api");
+    apiMod.api.verifyPaper = verify;
+    const user = userEvent.setup();
+    render(<LiteratureWorkspace />);
+    await user.type(screen.getByLabelText("Search publications"), "alzheimer");
+    await user.click(await screen.findByRole("button", { name: "Search" }));
+    await screen.findByText(hit.title);
+    await user.click(screen.getByRole("button", { name: "Verify" }));
+    await user.click(screen.getByRole("button", { name: "Check identifiers online" }));
+    expect(await screen.findByText("PMC maps PMC999 to PMID 7, not 9.")).toBeInTheDocument();
+    expect(screen.getByText("An identifier does not match this record.")).toBeInTheDocument();
+    expect(verify).toHaveBeenCalledWith("openalex", "W1");
+  });
+
+  it("shows source status with retries and retries only the failed provider, merging its papers", async () => {
+    const retried = { ...hit, external_id: "arx", doi: "10.9/arx", title: "Arrived after retry", source: "arxiv", relevance: 0.99, sources: [{ provider: "arxiv", external_id: "arx" }] };
+    mocks.search.mockResolvedValueOnce({ query: "q", source: "x", page: 1, warnings: ["arXiv: down"], total_unique: 1, duration_ms: 5, results: [{ ...hit, relevance: 0.2 }],
+      providers: [{ provider: "openalex", name: "OpenAlex", ok: true, count: 1, error: null, duration_ms: 100, requests: 1, retries: 0 }, { provider: "arxiv", name: "arXiv", ok: false, count: 0, error: "arXiv is down", error_kind: "error", duration_ms: 2400, requests: 3, retries: 2 }] })
+      .mockResolvedValueOnce({ query: "q", source: "arxiv", page: 1, warnings: [], total_unique: 1, duration_ms: 5, results: [retried], providers: [{ provider: "arxiv", name: "arXiv", ok: true, count: 1, error: null, duration_ms: 300, requests: 1, retries: 0 }] });
+    const user = userEvent.setup();
+    render(<LiteratureWorkspace />);
+    await user.type(screen.getByLabelText("Search publications"), "alzheimer");
+    await user.click(await screen.findByRole("button", { name: "Search" }));
+    await screen.findByText(hit.title);
+    expect(screen.getByText(/retried 2×/)).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Retry arXiv" }));
+    await screen.findByText("Arrived after retry");
+    expect(mocks.search).toHaveBeenLastCalledWith("alzheimer", ["arxiv"], 1);
+    const headings = screen.getAllByRole("heading", { level: 3 }).map((h) => h.textContent);
+    expect(headings).toEqual(["Arrived after retry", hit.title]); // re-ranked by relevance
+    expect(screen.queryByRole("button", { name: "Retry arXiv" })).not.toBeInTheDocument();
+  });
+
+  it("names Springer Nature correctly on result badges and lists key requirements", async () => {
+    mocks.search.mockResolvedValue({ query: "q", source: "x", page: 1, warnings: [], providers: [], total_unique: 1, duration_ms: 5,
+      results: [{ ...hit, source: "springer", sources: [{ provider: "springer", external_id: "10.1/x" }, { provider: "semanticscholar", external_id: "a" }] }] });
+    const user = userEvent.setup();
+    render(<LiteratureWorkspace />);
+    await user.type(screen.getByLabelText("Search publications"), "alzheimer");
+    await user.click(await screen.findByRole("button", { name: "Search" }));
+    await screen.findByText(hit.title);
+    const card = within(screen.getAllByRole("listitem").find((li) => li.querySelector("h3")) as HTMLElement);
+    expect(card.getByText("Springer Nature")).toBeInTheDocument();
+    expect(card.getByText("Semantic Scholar")).toBeInTheDocument();
+    await user.click(screen.getByText("Source details and API keys"));
+    expect(screen.getByText(/API key required: not configured \(set SPRINGER_API_KEY on the server\)/)).toBeInTheDocument();
+    expect(screen.getByText(/disabled: key missing/)).toBeInTheDocument();
   });
 });
 

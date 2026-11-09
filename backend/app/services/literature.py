@@ -7,8 +7,10 @@ function tests replace, so the parsing code is exercised without touching the in
 import html
 import logging
 import re
+import threading
 import time
 from typing import Any
+from urllib.parse import urlsplit
 
 import httpx
 
@@ -45,6 +47,29 @@ for _name in ("httpx", "httpcore"):
 
 
 _RETRY_STATUS = {429, 502, 503, 504}
+_stats = threading.local()  # per-thread counters so each provider (one worker thread) can report its own requests/retries
+
+
+def reset_request_stats() -> None:
+    _stats.requests = 0
+    _stats.retries = 0
+
+
+def request_stats() -> tuple[int, int]:
+    """(HTTP attempts made, of which retries) by the current thread since `reset_request_stats()`."""
+    return getattr(_stats, "requests", 0), getattr(_stats, "retries", 0)
+
+
+def safe_url(value: Any) -> str | None:
+    """Only absolute http(s) URLs from a source are ever shown as links (never javascript:, data:, etc.)."""
+    if not isinstance(value, str):
+        return None
+    v = value.strip()
+    try:
+        parts = urlsplit(v)
+    except ValueError:
+        return None
+    return v if parts.scheme in ("http", "https") and parts.netloc and " " not in v and len(v) <= 2000 else None
 
 
 def _request(url: str, params: dict[str, Any], headers: dict[str, str] | None) -> httpx.Response:
@@ -56,6 +81,8 @@ def _request(url: str, params: dict[str, Any], headers: dict[str, str] | None) -
     ua = "ResearchForge/0.4" + (f" (mailto:{s.contact_email})" if s.contact_email else "")
     last: LiteratureError = LiteratureError("unknown error")
     for attempt in range(3):
+        _stats.requests = getattr(_stats, "requests", 0) + 1
+        _stats.retries = getattr(_stats, "retries", 0) + (1 if attempt else 0)
         try:
             r = httpx.get(url, params=params, timeout=s.literature_timeout_seconds,
                           headers={"User-Agent": ua, **(headers or {})}, follow_redirects=True)
@@ -158,19 +185,24 @@ def parse_openalex_work(w: dict[str, Any]) -> dict[str, Any] | None:
     ids = w.get("ids") or {}
     pmid = _short_id(ids["pmid"]) if ids.get("pmid") else None
     doi = normalize_doi(w.get("doi"))
+    # A landing page on a repository (institutional archive, aggregator) is not the publisher's page, so it is not offered as one.
+    landing = None if src.get("type") == "repository" else safe_url(loc.get("landing_page_url"))
+    oa = w.get("open_access") or {}
     return {
         "source": "openalex",
         "external_id": _short_id(wid),
         "doi": doi,
         "pmid": pmid,
         "pmcid": normalize_pmcid(ids.get("pmcid")),
-        "publisher_url": loc.get("landing_page_url"),
+        "publisher_url": landing,
+        "oa_url": safe_url(oa.get("oa_url")) if oa.get("is_oa") else None,
+        "pub_types": [t for t in (w.get("type"), w.get("type_crossref")) if isinstance(t, str)],
         "title": title,
         "abstract": abstract_from_inverted_index(w.get("abstract_inverted_index")),
         "year": w.get("publication_year"),
         "venue": src.get("display_name"),
         "authors": [a["author"]["display_name"] for a in (w.get("authorships") or []) if (a.get("author") or {}).get("display_name")][:30],
-        "url": loc.get("landing_page_url") or (f"https://doi.org/{doi}" if doi else wid),
+        "url": landing or (f"https://doi.org/{doi}" if doi else wid),
         "cited_by_count": w.get("cited_by_count"),
         "keywords": keywords[:15],
         "reference_ids": [_short_id(r) for r in (w.get("referenced_works") or [])],
@@ -214,6 +246,8 @@ def parse_europepmc_record(r: dict[str, Any]) -> dict[str, Any] | None:
         "pmid": r.get("pmid"),
         "pmcid": normalize_pmcid(r.get("pmcid")),
         "publisher_url": None,
+        "oa_url": None,
+        "pub_types": [t for t in ((r.get("pubTypeList") or {}).get("pubType") or []) if isinstance(t, str)] + [f"source:{src}"],
         "title": title,
         "abstract": _clean(r.get("abstractText")),
         "year": int(year) if str(year).isdigit() else None,

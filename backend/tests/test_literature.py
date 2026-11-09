@@ -36,7 +36,7 @@ OA_W2 = {
     "referenced_works": [],
 }
 EPMC_REC = {
-    "id": "222", "source": "MED", "pmid": "222", "doi": "10.1000/abc.1",
+    "id": "111", "source": "MED", "pmid": "111", "doi": "10.1000/abc.1",
     "title": "Interpretable T1-weighted MRI biomarkers for Alzheimer's disease using a 3D CNN on ADNI",
     "authorString": "Lovelace A, Turing A.", "journalTitle": "NeuroImage", "pubYear": "2023",
     "abstractText": "<h4>Background</h4> We train a 3D CNN on ADNI data.", "citedByCount": 40,
@@ -70,7 +70,7 @@ def upstream(monkeypatch):
         if "ebi.ac.uk" in url:
             q = params["query"]
             if q.startswith("EXT_ID:"):
-                return {"resultList": {"result": [EPMC_REC] if "222" in q else ([EPMC_ONLY] if "333" in q else [])}}
+                return {"resultList": {"result": [EPMC_REC] if "111" in q else ([EPMC_ONLY] if "333" in q else [])}}
             return {"resultList": {"result": [EPMC_REC, EPMC_ONLY]}}
         raise AssertionError(url)
 
@@ -100,7 +100,7 @@ def test_missing_fields_stay_missing_nothing_is_invented():
 def test_europepmc_html_is_stripped():
     p = literature.parse_europepmc_record(EPMC_REC)
     assert p["abstract"] == "Background We train a 3D CNN on ADNI data."
-    assert p["external_id"] == "MED:222" and p["year"] == 2023 and p["authors"] == ["Lovelace A", "Turing A"]
+    assert p["external_id"] == "MED:111" and p["year"] == 2023 and p["authors"] == ["Lovelace A", "Turing A"]
 
 
 def test_extraction_records_the_matched_evidence():
@@ -188,7 +188,7 @@ def test_same_paper_from_two_sources_is_stored_once(client, upstream):
     register(client)
     pid = project(client)
     client.post(f"/api/projects/{pid}/papers", json={"source": "openalex", "external_id": "W1001"})
-    client.post(f"/api/projects/{pid}/papers", json={"source": "europepmc", "external_id": "MED:222"})
+    client.post(f"/api/projects/{pid}/papers", json={"source": "europepmc", "external_id": "MED:111"})
     assert len(client.get(f"/api/projects/{pid}/papers").json()) == 1  # same DOI
 
 

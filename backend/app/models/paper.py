@@ -30,6 +30,8 @@ class Paper(Base):
     pmcid: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)  # "PMC1234567"
     arxiv_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
     publisher_url: Mapped[str | None] = mapped_column(Text, nullable=True)  # landing page the source gave
+    oa_url: Mapped[str | None] = mapped_column(Text, nullable=True)  # open-access full text the source gave
+    publication_type: Mapped[str | None] = mapped_column(String(24), nullable=True)  # see services/verify.py PUBLICATION_TYPES
     title: Mapped[str] = mapped_column(Text, nullable=False)
     abstract: Mapped[str | None] = mapped_column(Text, nullable=True)
     year: Mapped[int | None] = mapped_column(Integer, nullable=True)

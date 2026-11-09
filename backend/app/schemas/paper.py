@@ -14,6 +14,36 @@ class Link(BaseModel):
     url: str
 
 
+class PrimaryLink(BaseModel):
+    kind: str
+    label: str
+    url: str
+    access: str  # "full_text" | "publisher" | "abstract" | "record"
+
+
+class Check(BaseModel):
+    id: str
+    status: str  # pass | warn | fail | info
+    detail: str
+
+
+class Verification(BaseModel):
+    """Agreement between the provider records merged into one result (no extra network calls)."""
+
+    status: str  # cross_checked | single_source | warning | conflict
+    sources_agreeing: int = 1
+    checks: list[Check] = []
+
+
+class MatchInfo(BaseModel):
+    terms: int = 0
+    terms_found: int = 0
+    missing_terms: list[str] = []
+    in_title: int = 0
+    exact_title: bool = False
+    phrase_found: bool = True
+
+
 class ProviderStatus(BaseModel):
     provider: str
     name: str
@@ -22,6 +52,8 @@ class ProviderStatus(BaseModel):
     error: str | None = None
     error_kind: str | None = None  # "timeout" | "rate_limit" | "error"
     duration_ms: int
+    requests: int = 0  # HTTP requests this provider made for the search (0 when answered from a test double)
+    retries: int = 0  # how many of them were automatic retries
 
 
 class ProviderInfo(BaseModel):
@@ -61,6 +93,12 @@ class PaperHit(BaseModel):
     sources: list[SourceRef] = []  # every provider record merged into this result
     preprint: bool = False
     links: list[Link] = []  # DOI / PubMed / PMC / arXiv / publisher / source pages, built from stored ids
+    primary_link: PrimaryLink | None = None  # the one "open" action: free full text first, then publisher, then abstract/record pages
+    oa_url: str | None = None  # open-access full-text URL supplied by a source (OpenAlex, Semantic Scholar, Springer OA)
+    publication_type: str | None = None  # journal_article | review | conference_paper | book_chapter | book | preprint | other | unknown
+    relevance: float | None = None  # unified 0..1 score of this result for the query (search results only)
+    match: MatchInfo | None = None
+    verification: Verification | None = None
 
 
 class SearchResponse(BaseModel):
@@ -72,6 +110,15 @@ class SearchResponse(BaseModel):
     providers: list[ProviderStatus] = []
     total_unique: int = 0  # unique papers in THIS response after deduplication (not the sum of provider counts)
     duration_ms: int = 0
+
+
+class VerifyResponse(BaseModel):
+    """Result of asking each identifier's authoritative registry about a paper (Crossref, PubMed, NCBI ID converter, arXiv)."""
+
+    source: str
+    external_id: str
+    status: str  # verified | warning | conflict | unchecked
+    checks: list[Check] = []
 
 
 class SavePaper(BaseModel):
