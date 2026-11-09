@@ -45,6 +45,9 @@ class Settings(BaseSettings):
     # --- literature sources (OpenAlex asks for a contact email: it moves you to their faster pool) ---
     contact_email: str = ""
     literature_timeout_seconds: float = 10.0
+    # optional keys: Semantic Scholar (higher rate limit) and NCBI (10 req/s instead of 3). Server-side only.
+    semantic_scholar_api_key: str = ""
+    ncbi_api_key: str = ""
 
     # --- abuse protection ---
     rate_limit_enabled: bool = True

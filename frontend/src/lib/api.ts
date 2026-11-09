@@ -1,5 +1,5 @@
 import type { LoginInput, RegisterInput, SessionInfo } from "@/types/auth";
-import type { LiteratureSearch, LiteratureSource, Paper } from "@/types/paper";
+import type { LiteratureSearch, Paper, ProviderInfo } from "@/types/paper";
 import type { Project, ProjectInput } from "@/types/project";
 
 // NEXT_PUBLIC_API_URL=same-origin makes the browser call /api/... on the site itself (used on Netlify,
@@ -114,8 +114,9 @@ export const api = {
 
   // --- projects (owner-scoped on the server) ---
   // --- literature (search is read-only; saving is authorised through project ownership) ---
-  searchLiterature: (q: string, source: LiteratureSource, page = 1) =>
-    request<LiteratureSearch>(`/api/literature/search?${new URLSearchParams({ q, source, page: String(page) })}`),
+  literatureProviders: () => request<ProviderInfo[]>("/api/literature/providers"),
+  searchLiterature: (q: string, providers: string[], page = 1) =>
+    request<LiteratureSearch>(`/api/literature/search?${new URLSearchParams({ q, providers: providers.join(","), page: String(page) })}`),
   savePaper: (projectId: number, paper: { source: string; external_id: string }) =>
     post<Paper>(`/api/projects/${projectId}/papers`, paper),
   listProjectPapers: (projectId: number) => request<Paper[]>(`/api/projects/${projectId}/papers`),

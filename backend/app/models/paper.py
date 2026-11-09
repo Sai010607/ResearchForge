@@ -23,10 +23,13 @@ class Paper(Base):
     )
 
     id: Mapped[int] = mapped_column(primary_key=True)
-    source: Mapped[str] = mapped_column(String(32), nullable=False)  # "openalex" | "europepmc"
-    external_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    source: Mapped[str] = mapped_column(String(32), nullable=False)  # provider id, see services/discovery.py
+    external_id: Mapped[str] = mapped_column(String(255), nullable=False)
     doi: Mapped[str | None] = mapped_column(String(255), nullable=True)  # lower-case, no URL prefix
     pmid: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    pmcid: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)  # "PMC1234567"
+    arxiv_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    publisher_url: Mapped[str | None] = mapped_column(Text, nullable=True)  # landing page the source gave
     title: Mapped[str] = mapped_column(Text, nullable=False)
     abstract: Mapped[str | None] = mapped_column(Text, nullable=True)
     year: Mapped[int | None] = mapped_column(Integer, nullable=True)

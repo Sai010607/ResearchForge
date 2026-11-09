@@ -2,20 +2,20 @@
 
 import { ExternalLink, Loader2, Search, Trash2 } from "lucide-react";
 import Link from "next/link";
-import { useMemo, useState, type FormEvent } from "react";
+import { useEffect, useMemo, useState, type FormEvent } from "react";
 import { buttonStyles } from "@/components/ui/MagneticButton";
 import { useMyPapers } from "@/hooks/useMyPapers";
 import { useProjects } from "@/hooks/useProjects";
 import { ApiError, api } from "@/lib/api";
 import { cn } from "@/lib/utils";
-import type { ExtractedTag, LiteratureSource, Paper, PaperHit } from "@/types/paper";
+import type { ExtractedTag, Paper, PaperHit, ProviderInfo, ProviderStatus } from "@/types/paper";
 
-const SOURCES: { id: LiteratureSource; label: string }[] = [
-  { id: "all", label: "All sources" },
-  { id: "openalex", label: "OpenAlex" },
-  { id: "europepmc", label: "Europe PMC" },
+const PRESETS: { label: string; pick: (p: ProviderInfo[]) => string[] }[] = [
+  { label: "Select all", pick: (p) => p.map((x) => x.id) },
+  { label: "Biomedical", pick: (p) => p.filter((x) => x.group === "biomedical" || x.id === "openalex").map((x) => x.id) },
+  { label: "Computer science", pick: (p) => p.filter((x) => x.group === "cs" || x.id === "openalex").map((x) => x.id) },
+  { label: "Deselect all", pick: () => [] },
 ];
-const SOURCE_NAME: Record<string, string> = { openalex: "OpenAlex", europepmc: "Europe PMC" };
 const TAG_GROUPS = [
   ["modalities", "Modality"],
   ["diseases", "Disease"],
@@ -24,6 +24,8 @@ const TAG_GROUPS = [
 ] as const;
 
 const keyOf = (h: { source: string; external_id: string }) => `${h.source}:${h.external_id}`;
+const refsOf = (h: PaperHit) => (h.sources?.length ? h.sources.map((s) => `${s.provider}:${s.external_id}`) : [keyOf(h)]);
+const providerName = (id: string) => ({ openalex: "OpenAlex", europepmc: "Europe PMC", pubmed: "PubMed", crossref: "Crossref", semanticscholar: "Semantic Scholar", arxiv: "arXiv" })[id] ?? id;
 
 function Tags({ paper }: { paper: PaperHit }) {
   const groups = TAG_GROUPS.map(([k, label]) => [label, (paper.extracted[k] ?? []) as ExtractedTag[]] as const).filter(([, l]) => l.length);
@@ -44,16 +46,26 @@ function Tags({ paper }: { paper: PaperHit }) {
 
 function Card({ paper, children }: { paper: PaperHit; children: React.ReactNode }) {
   const [open, setOpen] = useState(false);
+  const links = paper.links ?? [];
+  // "Open source" prefers the publisher page, then the DOI, then PubMed, then whatever the source gave
+  const primary = ["publisher", "doi", "pubmed", "arxiv"].map((k) => links.find((l) => l.kind === k)).find(Boolean) ?? (paper.url ? { url: paper.url } : links[0]);
   return (
     <li className="rounded-2xl border border-line bg-white/[0.02] p-5">
       <h3 className="text-[15px] font-medium leading-snug">{paper.title}</h3>
       <p className="mt-1.5 text-xs text-muted">
         {[paper.authors.slice(0, 4).join(", ") + (paper.authors.length > 4 ? " et al." : ""), paper.year, paper.venue].filter(Boolean).join(" · ")}
       </p>
-      <p className="mt-1 text-xs text-muted">
-        {SOURCE_NAME[paper.source] ?? paper.source}
-        {paper.cited_by_count != null && ` · cited by ${paper.cited_by_count}`}
-        {paper.doi && ` · doi:${paper.doi}`}
+      <p className="mt-1 flex flex-wrap items-center gap-1.5 text-xs text-muted">
+        {(paper.sources?.length ? paper.sources.map((s) => s.provider) : [paper.source]).map((id) => (
+          <span key={id} className="rounded border border-line px-1.5 py-0.5 text-[10px] uppercase tracking-wide text-slate-300">{providerName(id)}</span>
+        ))}
+        {paper.preprint && (
+          <span title="Record from a preprint server or DOI prefix; it may not be peer-reviewed." className="rounded border border-amber-400/40 px-1.5 py-0.5 text-[10px] uppercase tracking-wide text-amber-300">Preprint</span>
+        )}
+        <span>
+          {paper.cited_by_count != null && `cited by ${paper.cited_by_count}`}
+          {paper.doi && `${paper.cited_by_count != null ? " · " : ""}doi:${paper.doi}`}
+        </span>
       </p>
       <Tags paper={paper} />
       {paper.abstract ? (
@@ -68,12 +80,24 @@ function Card({ paper, children }: { paper: PaperHit; children: React.ReactNode 
       )}
       <div className="mt-4 flex flex-wrap items-center gap-3">
         {children}
-        {paper.url && (
-          <a href={paper.url} target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1 text-xs text-muted hover:text-white">
+        {primary && (
+          <a href={primary.url} target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1 text-xs text-sky-300 hover:text-white">
             Open source <ExternalLink className="h-3 w-3" aria-hidden />
           </a>
         )}
       </div>
+      {links.length > 0 && (
+        <ul aria-label="Links" className="mt-3 flex flex-wrap gap-x-4 gap-y-1 text-[11px]">
+          {links.map((l) => (
+            <li key={l.url}>
+              <a href={l.url} target="_blank" rel="noopener noreferrer" title={l.url} className="text-muted underline-offset-2 hover:text-white hover:underline">
+                {l.label}
+                {l.kind === "doi" && paper.doi ? `: ${paper.doi}` : l.kind === "pubmed" && paper.pmid ? ` ${paper.pmid}` : l.kind === "pmc" && paper.pmcid ? ` ${paper.pmcid}` : l.kind === "arxiv" && paper.arxiv_id ? ` ${paper.arxiv_id}` : ""}
+              </a>
+            </li>
+          ))}
+        </ul>
+      )}
     </li>
   );
 }
@@ -84,15 +108,37 @@ export function LiteratureWorkspace() {
   const [tab, setTab] = useState<"search" | "saved">("search");
   const [projectId, setProjectId] = useState<number | null>(null);
   const [q, setQ] = useState("");
-  const [source, setSource] = useState<LiteratureSource>("all");
+  const [providers, setProviders] = useState<ProviderInfo[]>([]);
+  const [providerError, setProviderError] = useState("");
+  const [providerTry, setProviderTry] = useState(0);
+  const [selected, setSelected] = useState<string[]>([]);
+  const [stats, setStats] = useState<Record<string, ProviderStatus>>({});
+  const [duration, setDuration] = useState(0);
   const [results, setResults] = useState<PaperHit[]>([]);
   const [warnings, setWarnings] = useState<string[]>([]);
   const [page, setPage] = useState(0);
   const [busy, setBusy] = useState(false);
+  const [appending, setAppending] = useState(false);
   const [searched, setSearched] = useState("");
   const [error, setError] = useState("");
   const [saving, setSaving] = useState<Set<string>>(new Set());
   const [saveErr, setSaveErr] = useState<Record<string, string>>({});
+
+  useEffect(() => {
+    let alive = true;
+    api
+      .literatureProviders()
+      .then((list) => {
+        if (!alive) return;
+        setProviders(list);
+        setProviderError("");
+        setSelected((prev) => (prev.length ? prev : list.filter((p) => p.default_enabled).map((p) => p.id)));
+      })
+      .catch((e: unknown) => alive && setProviderError(e instanceof ApiError ? e.message : "Could not load the list of sources."));
+    return () => {
+      alive = false;
+    };
+  }, [providerTry]);
 
   const activeId = projectId ?? projects[0]?.id ?? null;
   const savedInProject = useMemo(() => {
@@ -104,15 +150,37 @@ export function LiteratureWorkspace() {
 
   async function run(query: string, nextPage: number, append: boolean) {
     setBusy(true);
+    setAppending(append);
     setError("");
+    if (!append) {
+      setResults([]);
+      setStats({});
+      setWarnings([]);
+    }
     try {
-      const r = await api.searchLiterature(query, source, nextPage);
-      setResults((prev) => (append ? [...prev, ...r.results] : r.results));
+      const r = await api.searchLiterature(query, selected, nextPage);
+      setResults((prev) => {
+        if (!append) return r.results;
+        const seen = new Set(prev.flatMap(refsOf));
+        return [...prev, ...r.results.filter((h) => !refsOf(h).some((k) => seen.has(k)))];
+      });
+      setStats((prev) => {
+        const next: Record<string, ProviderStatus> = append ? { ...prev } : {};
+        for (const st of r.providers) {
+          const before = append ? prev[st.provider] : undefined;
+          next[st.provider] = { ...st, count: st.count + (before?.count ?? 0), duration_ms: st.duration_ms + (before?.duration_ms ?? 0) };
+        }
+        return next;
+      });
+      setDuration((d) => (append ? d : 0) + r.duration_ms);
       setWarnings(r.warnings);
       setPage(nextPage);
       setSearched(query);
     } catch (e) {
-      if (!append) setResults([]);
+      if (!append) {
+        setResults([]);
+        setStats({});
+      }
       setError(e instanceof ApiError ? e.message : "Search failed. Check your connection and try again.");
     } finally {
       setBusy(false);
@@ -121,7 +189,7 @@ export function LiteratureWorkspace() {
   function onSubmit(e: FormEvent) {
     e.preventDefault();
     const t = q.trim();
-    if (t.length >= 2 && !busy) void run(t, 1, false);
+    if (t.length >= 3 && !busy && selected.length > 0) void run(t, 1, false);
   }
   async function save(h: PaperHit) {
     if (activeId == null) return;
@@ -151,6 +219,16 @@ export function LiteratureWorkspace() {
     }
   }
 
+  const [slow, setSlow] = useState(false);
+  useEffect(() => {
+    if (!busy) return;
+    const t = setTimeout(() => setSlow(true), 6000);
+    return () => {
+      clearTimeout(t);
+      setSlow(false);
+    };
+  }, [busy]);
+
   const noProject = !projectsLoading && projects.length === 0;
 
   return (
@@ -158,7 +236,7 @@ export function LiteratureWorkspace() {
       <p className="eyebrow">Literature</p>
       <h1 className="mt-3 text-3xl font-semibold tracking-tight">Find and save real publications</h1>
       <p className="mt-3 max-w-2xl text-sm text-muted">
-        Results come live from OpenAlex and Europe PMC. Saved papers are stored in your project. Detected terms are
+        Results come live from OpenAlex, PubMed, Europe PMC, Crossref, arXiv and (optionally) Semantic Scholar, merged and de-duplicated by DOI, PMID and arXiv id. Saved papers are stored in your project. Detected terms are
         rule-based matches on each paper’s own title and abstract (hover a tag to see what matched), not AI summaries.
       </p>
 
@@ -197,25 +275,78 @@ export function LiteratureWorkspace() {
                     placeholder="e.g. alzheimer MRI biomarkers deep learning"
                     className="w-full rounded-xl border border-line bg-transparent py-2.5 pl-9 pr-3 text-sm outline-none focus:border-sky-400" />
                 </div>
-                <select value={source} onChange={(e) => setSource(e.target.value as LiteratureSource)} aria-label="Source"
-                  className="rounded-xl border border-line bg-transparent px-3 text-sm">
-                  {SOURCES.map((s) => <option key={s.id} value={s.id} className="bg-slate-900">{s.label}</option>)}
-                </select>
-                <button type="submit" disabled={busy || q.trim().length < 2} className={cn(buttonStyles("primary"), "disabled:opacity-50")}>
-                  {busy && page === 0 ? "Searching…" : "Search"}
+                <button type="submit" disabled={busy || q.trim().length < 3 || selected.length === 0} className={cn(buttonStyles("primary"), "disabled:opacity-50")}>
+                  {busy && !appending ? "Searching…" : "Search"}
                 </button>
               </form>
 
-              {error && <div role="alert" className="mt-4 rounded-xl border border-red-500/30 bg-red-500/10 p-3 text-sm text-red-300">{error}</div>}
-              {warnings.map((w) => <p key={w} role="status" className="mt-3 text-xs text-amber-300">{w}</p>)}
+              <fieldset className="mt-4">
+                <legend className="mb-2 text-xs text-muted">Sources</legend>
+                {providerError ? (
+                  <p role="alert" className="text-xs text-red-300">
+                    {providerError}{" "}
+                    <button type="button" className="underline" onClick={() => setProviderTry((n) => n + 1)}>Retry</button>
+                  </p>
+                ) : providers.length === 0 ? (
+                  <div className="h-7 w-64 animate-pulse rounded-full bg-white/[0.04]" aria-busy="true" />
+                ) : (
+                  <div className="flex flex-wrap items-center gap-2">
+                    {PRESETS.map((pr) => (
+                      <button key={pr.label} type="button" onClick={() => setSelected(pr.pick(providers))}
+                        className="rounded-full px-2 py-1 text-[11px] text-muted underline-offset-2 hover:text-white hover:underline">{pr.label}</button>
+                    ))}
+                    <span className="mx-1 h-4 w-px bg-line" aria-hidden />
+                    {providers.map((p) => {
+                      const on = selected.includes(p.id);
+                      return (
+                        <label key={p.id} title={`${p.rate_limit}${p.supports_key && !p.key_configured ? ". Optional API key not set on the server." : ""}`}
+                          className={cn("cursor-pointer rounded-full border px-3 py-1 text-xs", on ? "border-sky-400 text-white" : "border-line text-muted")}>
+                          <input type="checkbox" className="sr-only" checked={on}
+                            onChange={() => setSelected((s) => (on ? s.filter((x) => x !== p.id) : [...s, p.id]))} />
+                          {p.name}
+                        </label>
+                      );
+                    })}
+                  </div>
+                )}
+              </fieldset>
+
+              {error && (
+                <div role="alert" className="mt-4 rounded-xl border border-red-500/30 bg-red-500/10 p-3 text-sm text-red-300">
+                  {error}
+                  <button type="button" onClick={() => void run(q.trim(), 1, false)} className="ml-3 underline">Retry</button>
+                </div>
+              )}
+              {searched && !error && !(busy && !appending) && (
+                <div role="status" className="mt-4 text-xs text-muted">
+                  <p>
+                    <strong className="text-slate-200">{results.length}</strong> unique papers for “{searched}” · page {page} · {(duration / 1000).toFixed(1)} s
+                  </p>
+                  <p className="mt-1 flex flex-wrap gap-2">
+                    {Object.values(stats).map((st) => (
+                      <span key={st.provider} title={st.error ?? `${st.count} records returned, before duplicates were merged`}
+                        className={cn("rounded border px-1.5 py-0.5", st.ok ? "border-line" : "border-red-500/40 text-red-300")}>
+                        {st.name}: {st.ok ? st.count : st.error_kind === "timeout" ? "timed out" : st.error_kind === "rate_limit" ? "rate-limited" : "failed"}
+                      </span>
+                    ))}
+                  </p>
+                  {warnings.map((w) => <p key={w} className="mt-1 text-amber-300">{w}</p>)}
+                </div>
+              )}
               {searched && !busy && !error && results.length === 0 && (
                 <p className="mt-6 text-sm text-muted">No publications found for “{searched}”.</p>
               )}
 
+              {busy && !appending && (
+                <div aria-busy="true" aria-label="Searching" className="mt-5 space-y-4">
+                  {[0, 1, 2].map((i) => <div key={i} className="h-32 animate-pulse rounded-2xl bg-white/[0.03]" />)}
+                  {slow && <p className="text-xs text-muted">Still searching. The server may be waking up or a source is slow; the other sources will still be shown.</p>}
+                </div>
+              )}
               <ul className="mt-5 space-y-4">
                 {results.map((h) => {
                   const k = keyOf(h);
-                  const done = savedInProject.has(k) || (h.doi != null && [...savedInProject.values()].some((p) => p.doi === h.doi));
+                  const done = refsOf(h).some((r) => savedInProject.has(r)) || (h.doi != null && [...savedInProject.values()].some((p) => p.doi === h.doi)) || (h.pmid != null && [...savedInProject.values()].some((p) => p.pmid === h.pmid));
                   return (
                     <Card key={k} paper={h}>
                       {done ? (

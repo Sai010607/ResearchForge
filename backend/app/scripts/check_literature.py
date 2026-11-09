@@ -2,24 +2,26 @@
 
     python -m app.scripts.check_literature "alzheimer MRI biomarkers"
 
-Prints what OpenAlex and Europe PMC really return, using the same parsing code the API uses.
+Prints what every provider (OpenAlex, PubMed, Europe PMC, Crossref, arXiv, Semantic Scholar) really returns, using the same parsing code the API uses.
 Exit code 1 if a source fails or returns something unparseable.
 """
 import sys
 
-from app.services import literature
+from app.services import discovery, literature
 from app.services.extraction import extract_metadata
 
 
 def main() -> int:
     query = " ".join(sys.argv[1:]) or "alzheimer MRI biomarkers"
     ok = True
-    for name, fn in (("OpenAlex", literature.search_openalex), ("Europe PMC", literature.search_europepmc)):
+    for p in discovery.PROVIDERS:
+        name, fn = p.name, p.search
         try:
             papers = fn(query, 1, 3)
         except literature.LiteratureError as exc:
-            print(f"[FAIL] {name}: {exc}")
-            ok = False
+            # Semantic Scholar without a key is often rate-limited: report, but do not fail the run
+            print(f"[{'WARN' if p.id == 'semanticscholar' else 'FAIL'}] {name}: {exc}")
+            ok = ok and p.id == 'semanticscholar'
             continue
         print(f"[ OK ] {name}: {len(papers)} results for {query!r}")
         for p in papers:
@@ -27,7 +29,7 @@ def main() -> int:
             tags = [t["value"] for k in ("modalities", "datasets", "methods") for t in x[k]]
             print(f"   - {p['year']} | {p['title'][:90]}")
             print(f"     id={p['external_id']} doi={p['doi']} abstract={'yes' if p['abstract'] else 'no'} refs={len(p['reference_ids'])} tags={tags}")
-        if not papers:
+        if not papers and p.id != 'semanticscholar':
             ok = False
     # prove "save by id" round-trips for the first OpenAlex hit
     try:

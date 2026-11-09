@@ -7,7 +7,7 @@
 - The client only names a paper (source + id). The server fetches it, so stored data is always
   what the source returned.
 """
-from typing import Any, Literal
+from typing import Any
 
 from fastapi import APIRouter, Depends, Query, Response, status
 from sqlalchemy import func, select
@@ -21,8 +21,8 @@ from app.core.config import get_settings
 from app.core.database import get_db
 from app.core.errors import api_error
 from app.models import Paper, Project, ProjectPaper
-from app.schemas.paper import PaperRead, SavePaper, SearchResponse
-from app.services import literature
+from app.schemas.paper import PaperRead, ProviderInfo, SavePaper, SearchResponse
+from app.services import discovery, literature
 from app.services.extraction import extract_metadata
 
 router = APIRouter(tags=["literature"])
@@ -38,19 +38,36 @@ def _hit(p: dict[str, Any]) -> dict[str, Any]:
     return out
 
 
+@router.get("/api/literature/providers", response_model=list[ProviderInfo])
+def list_providers(identity: Identity = Depends(require_identity)) -> list[dict[str, Any]]:
+    """The provider registry. Never includes key values, only whether an optional key is configured."""
+    return discovery.registry()
+
+
 @router.get("/api/literature/search", response_model=SearchResponse)
 def search_literature(
     q: str = Query(min_length=3, max_length=200),
-    source: Literal["all", "openalex", "europepmc"] = "all",
+    providers: str | None = Query(None, max_length=200, description="comma-separated provider ids; default = all default providers"),
+    source: str = Query("all", max_length=20, description="legacy: 'all' or a single provider id"),
     page: int = Query(1, ge=1, le=20),
     identity: Identity = Depends(require_identity),
 ) -> dict[str, Any]:
+    if providers:
+        ids = list(dict.fromkeys(i.strip() for i in providers.split(",") if i.strip()))
+    elif source != "all":
+        ids = [source]
+    else:
+        ids = discovery.default_provider_ids()
+    unknown = [i for i in ids if i not in discovery.BY_ID]
+    if unknown or not ids:
+        raise api_error(422, "unknown_provider", f"Unknown provider: {', '.join(unknown) or 'none selected'}")
     rate_limit.check("lit-search", _identity_key(identity), get_settings().literature_searches_per_hour, 3600)
     try:
-        results, warnings = literature.search(q.strip(), source, page)
+        out = discovery.search_all(q.strip(), ids, page)
     except literature.LiteratureError as exc:
         raise api_error(502, "literature_unavailable", str(exc))
-    return {"query": q.strip(), "source": source, "page": page, "results": [_hit(p) for p in results], "warnings": warnings}
+    out["results"] = [_hit(p) for p in out["results"]]
+    return {"query": q.strip(), "source": ",".join(ids), "page": page, **out}
 
 
 def _upsert_paper(db: Session, data: dict[str, Any]) -> Paper:
@@ -64,7 +81,8 @@ def _upsert_paper(db: Session, data: dict[str, Any]) -> Paper:
     if paper is not None:
         return paper
     extracted = extract_metadata(data["title"], data.get("abstract"), data.get("keywords") or [])
-    paper = Paper(**data, extracted=extracted)
+    fields = {k: v for k, v in data.items() if k not in ("sources", "preprint", "links")}
+    paper = Paper(**fields, extracted=extracted)
     db.add(paper)
     try:
         db.flush()
@@ -78,7 +96,9 @@ def _upsert_paper(db: Session, data: dict[str, Any]) -> Paper:
 
 def _to_read(p: Paper, project_ids: list[int], cites: list[int]) -> dict[str, Any]:
     return {
-        "id": p.id, "source": p.source, "external_id": p.external_id, "doi": p.doi, "pmid": p.pmid,
+        "id": p.id, "source": p.source, "external_id": p.external_id, "doi": p.doi, "pmid": p.pmid, "pmcid": p.pmcid,
+        "arxiv_id": p.arxiv_id, "publisher_url": p.publisher_url,
+        "links": discovery.build_links({"source": p.source, "external_id": p.external_id, "doi": p.doi, "pmid": p.pmid, "pmcid": p.pmcid, "arxiv_id": p.arxiv_id, "publisher_url": p.publisher_url}),
         "title": p.title, "abstract": p.abstract, "year": p.year, "venue": p.venue, "authors": p.authors,
         "url": p.url, "cited_by_count": p.cited_by_count, "keywords": p.keywords, "extracted": p.extracted,
         "project_ids": project_ids, "cites": cites,
@@ -111,7 +131,7 @@ def save_paper(
         raise api_error(403, "paper_limit_reached", f"A project can hold up to {s.max_papers_per_project} papers.")
     if existing is None:
         try:
-            data = literature.fetch_paper(payload.source, payload.external_id)
+            data = discovery.fetch_paper(payload.source, payload.external_id)
         except literature.PaperNotFound as exc:
             raise api_error(404, "paper_not_found", str(exc))
         except literature.LiteratureError as exc:

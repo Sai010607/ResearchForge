@@ -4,7 +4,9 @@ Everything returned here comes from the upstream response. Nothing is invented o
 a missing abstract stays missing. All network access goes through `http_get_json`, the single
 function tests replace, so the parsing code is exercised without touching the internet.
 """
+import html
 import re
+import time
 from typing import Any
 
 import httpx
@@ -24,21 +26,71 @@ class PaperNotFound(LiteratureError):
     pass
 
 
-def http_get_json(url: str, params: dict[str, Any]) -> Any:
+class LiteratureTimeout(LiteratureError):
+    kind = "timeout"
+
+
+class LiteratureRateLimited(LiteratureError):
+    kind = "rate_limit"
+
+
+_RETRY_STATUS = {429, 502, 503, 504}
+
+
+def _request(url: str, params: dict[str, Any], headers: dict[str, str] | None) -> httpx.Response:
+    """GET with a few retries and exponential backoff on network errors, 429 and 5xx.
+
+    Error messages never contain the URL or headers, so API keys cannot leak into logs or the UI.
+    """
     s = get_settings()
-    ua = "ResearchForge/0.3" + (f" (mailto:{s.contact_email})" if s.contact_email else "")
-    try:
-        r = httpx.get(url, params=params, timeout=s.literature_timeout_seconds, headers={"User-Agent": ua}, follow_redirects=True)
-    except httpx.HTTPError as exc:
-        raise LiteratureError(f"Could not reach the literature source ({type(exc).__name__}).") from exc
+    ua = "ResearchForge/0.4" + (f" (mailto:{s.contact_email})" if s.contact_email else "")
+    last: LiteratureError = LiteratureError("unknown error")
+    for attempt in range(3):
+        try:
+            r = httpx.get(url, params=params, timeout=s.literature_timeout_seconds,
+                          headers={"User-Agent": ua, **(headers or {})}, follow_redirects=True)
+        except httpx.TimeoutException:
+            last = LiteratureTimeout(f"The literature source did not answer within {s.literature_timeout_seconds:g} s.")
+        except httpx.HTTPError as exc:
+            last = LiteratureError(f"Could not reach the literature source ({type(exc).__name__}).")
+        else:
+            if r.status_code not in _RETRY_STATUS:
+                return r
+            last = (
+                LiteratureRateLimited("The literature source is rate-limiting requests (HTTP 429). Try again shortly.")
+                if r.status_code == 429 else LiteratureError(f"The literature source returned HTTP {r.status_code}.")
+            )
+            ra = r.headers.get("retry-after", "")
+            if attempt < 2 and ra.isdigit():
+                time.sleep(min(int(ra), 2))
+                continue
+        if attempt < 2:
+            time.sleep(0.4 * 2**attempt)
+    raise last
+
+
+def _checked(r: httpx.Response) -> httpx.Response:
     if r.status_code == 404:
         raise PaperNotFound("Paper not found at the source.")
     if r.status_code >= 400:
         raise LiteratureError(f"The literature source returned HTTP {r.status_code}.")
+    return r
+
+
+def http_get_json(url: str, params: dict[str, Any], headers: dict[str, str] | None = None) -> Any:
+    r = _checked(_request(url, params, headers))
     try:
         return r.json()
     except ValueError as exc:
         raise LiteratureError("The literature source returned an unreadable response.") from exc
+
+
+def http_get_text(url: str, params: dict[str, Any], headers: dict[str, str] | None = None) -> str:
+    """Second network seam (XML sources). Capped at 5 MB."""
+    r = _checked(_request(url, params, headers))
+    if len(r.content) > 5_000_000:
+        raise LiteratureError("The literature source returned an unexpectedly large response.")
+    return r.text
 
 
 # ----------------------------------------------------------------------------- helpers
@@ -54,8 +106,17 @@ def _clean(text: str | None) -> str | None:
     if not text:
         return None
     text = re.sub(r"<[^>]+>", "", text)  # Europe PMC abstracts contain simple HTML tags
+    text = html.unescape(text)  # Crossref/PubMed titles arrive with entities such as &amp; and &lt;
     text = re.sub(r"\s+", " ", text).strip()
     return text or None
+
+
+def normalize_pmcid(value: Any) -> str | None:
+    """'PMC123', 'pmc123', a PMC URL or a bare number -> 'PMC123'; anything else -> None."""
+    if value is None or value == "":
+        return None
+    m = re.search(r"(?i)PMC(\d{1,10})", str(value)) or re.fullmatch(r"(\d{1,10})", str(value).strip())
+    return f"PMC{m.group(1)}" if m else None
 
 
 def _short_id(url_or_id: str) -> str:
@@ -92,6 +153,8 @@ def parse_openalex_work(w: dict[str, Any]) -> dict[str, Any] | None:
         "external_id": _short_id(wid),
         "doi": doi,
         "pmid": pmid,
+        "pmcid": normalize_pmcid(ids.get("pmcid")),
+        "publisher_url": loc.get("landing_page_url"),
         "title": title,
         "abstract": abstract_from_inverted_index(w.get("abstract_inverted_index")),
         "year": w.get("publication_year"),
@@ -139,6 +202,8 @@ def parse_europepmc_record(r: dict[str, Any]) -> dict[str, Any] | None:
         "external_id": f"{src}:{rid}",
         "doi": doi,
         "pmid": r.get("pmid"),
+        "pmcid": normalize_pmcid(r.get("pmcid")),
+        "publisher_url": None,
         "title": title,
         "abstract": _clean(r.get("abstractText")),
         "year": int(year) if str(year).isdigit() else None,

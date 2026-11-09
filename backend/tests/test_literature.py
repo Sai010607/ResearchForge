@@ -125,19 +125,19 @@ def test_search_requires_identity(make_client):
 
 def test_search_merges_sources_and_dedupes_by_doi(client, upstream):
     register(client)
-    r = client.get("/api/literature/search", params={"q": "alzheimer mri"})
+    r = client.get("/api/literature/search", params={"q": "alzheimer mri", "providers": "openalex,europepmc"})
     assert r.status_code == 200
     body = r.json()
     titles = [p["title"] for p in body["results"]]
     assert len(titles) == 3  # W1001 + W1002 + EPMC-only; EPMC duplicate of W1001 merged by DOI
-    assert body["results"][0]["source"] == "openalex" and body["warnings"] == []
+    assert body["results"][0]["source"] == "openalex" and body["warnings"] == [] and body["total_unique"] == 3 and [p["count"] for p in body["providers"]] == [2, 2]
     assert body["results"][0]["extracted"]["datasets"][0]["value"] == "ADNI"
 
 
 def test_one_failing_source_becomes_a_warning(client, upstream):
     register(client)
     upstream.state["fail"].add("openalex")
-    r = client.get("/api/literature/search", params={"q": "alzheimer mri"})
+    r = client.get("/api/literature/search", params={"q": "alzheimer mri", "providers": "openalex,europepmc"})
     assert r.status_code == 200 and len(r.json()["results"]) == 2
     assert "OpenAlex" in r.json()["warnings"][0]
 
@@ -145,7 +145,7 @@ def test_one_failing_source_becomes_a_warning(client, upstream):
 def test_all_sources_failing_is_a_clear_502(client, upstream):
     register(client)
     upstream.state["fail"].update({"openalex", "europepmc"})
-    r = client.get("/api/literature/search", params={"q": "alzheimer mri"})
+    r = client.get("/api/literature/search", params={"q": "alzheimer mri", "providers": "openalex,europepmc"})
     assert r.status_code == 502 and error_code(r) == "literature_unavailable"
 
 
@@ -267,5 +267,5 @@ def test_deleting_a_project_removes_its_links_but_keeps_other_users_data(make_cl
 def test_search_is_rate_limited(client, upstream, enable_rate_limit, settings, monkeypatch):
     register(client)
     monkeypatch.setattr(settings, "literature_searches_per_hour", 2)
-    codes = [client.get("/api/literature/search", params={"q": "alzheimer mri"}).status_code for _ in range(3)]
+    codes = [client.get("/api/literature/search", params={"q": "alzheimer mri", "providers": "openalex,europepmc"}).status_code for _ in range(3)]
     assert codes == [200, 200, 429]
