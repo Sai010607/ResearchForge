@@ -9,6 +9,7 @@ Search is a metadata and abstract search. **No full text is retrieved**; every p
 | Europe PMC | none | PMID/PMCID, preprints (`PPR:` ids) |
 | Crossref | none (`CONTACT_EMAIL` recommended) | DOI metadata, publisher URL |
 | arXiv | none | preprints only, about 1 request per 3 s |
+| Springer Nature | **required** `SPRINGER_API_KEY` (or `SPRINGER_OA_API_KEY`) | Meta v2 API (`/meta/v2/json`), or the Open Access API when only an OA key is set. Off until a key exists. Records without a DOI are skipped. |
 | Semantic Scholar | optional `SEMANTIC_SCHOLAR_API_KEY` | off by default without a key (shared rate-limited pool) |
 
 Every provider runs concurrently with its own timeout (`LITERATURE_TIMEOUT_SECONDS`, 10 s), up to 3 attempts with exponential backoff on network errors, 429 and 5xx, and its own status in the response. One failing provider never blocks the others.

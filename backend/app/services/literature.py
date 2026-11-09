@@ -5,6 +5,7 @@ a missing abstract stays missing. All network access goes through `http_get_json
 function tests replace, so the parsing code is exercised without touching the internet.
 """
 import html
+import logging
 import re
 import time
 from typing import Any
@@ -32,6 +33,15 @@ class LiteratureTimeout(LiteratureError):
 
 class LiteratureRateLimited(LiteratureError):
     kind = "rate_limit"
+
+
+class LiteratureNotConfigured(LiteratureError):
+    kind = "not_configured"
+
+
+# httpx logs full request URLs at INFO, and some providers take the API key as a query parameter.
+for _name in ("httpx", "httpcore"):
+    logging.getLogger(_name).setLevel(logging.WARNING)
 
 
 _RETRY_STATUS = {429, 502, 503, 504}

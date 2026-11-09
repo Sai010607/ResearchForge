@@ -17,7 +17,7 @@ from urllib.parse import quote
 
 from app.core.config import get_settings
 from app.services import literature
-from app.services.literature import LiteratureError, PaperNotFound, _clean, normalize_doi, normalize_pmcid
+from app.services.literature import LiteratureError, LiteratureNotConfigured, PaperNotFound, _clean, normalize_doi, normalize_pmcid
 
 log = logging.getLogger("researchforge.discovery")
 
@@ -25,6 +25,7 @@ CROSSREF = "https://api.crossref.org"
 EUTILS = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils"
 ARXIV = "https://export.arxiv.org/api/query"
 S2 = "https://api.semanticscholar.org/graph/v1"
+SPRINGER = "https://api.springernature.com"
 S2_FIELDS = "title,abstract,year,venue,authors,externalIds,citationCount,url,referenceCount"
 DOI_RE = re.compile(r"10\.\d{4,9}/\S{1,150}")
 ARXIV_RE = re.compile(r"\d{4}\.\d{4,5}(v\d+)?|[a-z\-]+(\.[A-Za-z]{2})?/\d{7}(v\d+)?")
@@ -258,6 +259,76 @@ def fetch_semanticscholar(external_id: str) -> dict[str, Any]:
     return paper
 
 
+# ----------------------------------------------------------------------------- Springer Nature
+_SPRINGER_HTTPS_HOSTS = ("link.springer.com", "springeropen.com", "biomedcentral.com", "nature.com")
+
+
+def _springer_text(v: Any) -> str | None:
+    """Abstract may be a string or a small structure of strings; only text the source gave is used."""
+    if isinstance(v, str):
+        return _clean(v)
+    if isinstance(v, dict):
+        return _clean(" ".join(t for t in (_springer_text(x) for x in v.values()) if t))
+    if isinstance(v, list):
+        return _clean(" ".join(t for t in (_springer_text(x) for x in v) if t))
+    return None
+
+
+def parse_springer_record(r: dict[str, Any]) -> dict[str, Any] | None:
+    title, doi = _clean(r.get("title")), normalize_doi(r.get("doi"))
+    if not title or not doi:  # books without a DOI cannot be fetched again by id, so they are skipped
+        return None
+    authors = []
+    for c in r.get("creators") or []:
+        name = (c.get("creator") if isinstance(c, dict) else c) or ""
+        last, _, first = name.partition(",")
+        name = f"{first.strip()} {last.strip()}".strip() if first.strip() else name.strip()
+        if name:
+            authors.append(name)
+    page = None
+    for u in r.get("url") or []:
+        v = u.get("value") if isinstance(u, dict) else None
+        if v and not re.match(r"https?://(dx\.)?doi\.org/", v):
+            page = v
+            break
+    if page and page.startswith("http://") and any(h in page.split("/")[2] for h in _SPRINGER_HTTPS_HOSTS):
+        page = "https://" + page[len("http://"):]
+    kws = r.get("keyword") or r.get("subjects") or []
+    return {
+        "source": "springer", "external_id": doi, "doi": doi, "pmid": None, "pmcid": None, "publisher_url": page,
+        "title": title, "abstract": _springer_text(r.get("abstract")), "year": _year(r.get("publicationDate")),
+        "venue": r.get("publicationName") or None, "authors": authors[:30], "url": page or f"https://doi.org/{doi}",
+        "cited_by_count": None, "keywords": [k for k in kws if isinstance(k, str)][:15], "reference_ids": [],
+    }
+
+
+def _springer_endpoint() -> tuple[str, str]:
+    s = get_settings()
+    if s.springer_api_key:
+        return f"{SPRINGER}/meta/v2/json", s.springer_api_key
+    if s.springer_oa_api_key:
+        return f"{SPRINGER}/openaccess/json", s.springer_oa_api_key
+    raise LiteratureNotConfigured("Springer Nature needs an API key. Set SPRINGER_API_KEY on the server (free key from dev.springernature.com).")
+
+
+def search_springer(query: str, page: int, per_page: int) -> list[dict[str, Any]]:
+    url, key = _springer_endpoint()
+    data = _get_json(url, {"q": query, "p": per_page, "s": (page - 1) * per_page + 1, "api_key": key})
+    return [p for p in (parse_springer_record(r) for r in (data or {}).get("records") or []) if p]
+
+
+def fetch_springer(external_id: str) -> dict[str, Any]:
+    if not DOI_RE.fullmatch(external_id) or '"' in external_id:
+        raise PaperNotFound("Unrecognised DOI.")
+    url, key = _springer_endpoint()
+    data = _get_json(url, {"q": f'doi:"{external_id}"', "p": 1, "s": 1, "api_key": key})
+    for r in (data or {}).get("records") or []:
+        paper = parse_springer_record(r)
+        if paper and paper["doi"] == external_id.lower():
+            return paper
+    raise PaperNotFound("Paper not found at the source.")
+
+
 # ----------------------------------------------------------------------------- registry
 @dataclass(frozen=True)
 class Provider:
@@ -271,9 +342,11 @@ class Provider:
     key_setting: str | None = None  # name of the optional backend setting / env var
     key_required: bool = False
     default_on: bool = True
+    alt_key_setting: str | None = None
 
     def has_key(self) -> bool:
-        return bool(self.key_setting and getattr(get_settings(), self.key_setting.lower(), ""))
+        s = get_settings()
+        return any(getattr(s, k.lower(), "") for k in (self.key_setting, self.alt_key_setting) if k)
 
 
 # Order = merge priority: the first provider's record becomes the canonical one (OpenAlex also
@@ -287,6 +360,9 @@ PROVIDERS: tuple[Provider, ...] = (
              "https://europepmc.org/RestfulWebService", "No published hard limit"),
     Provider("crossref", "Crossref", "general", search_crossref, fetch_crossref,
              "https://api.crossref.org/swagger-ui/index.html", "Polite pool when CONTACT_EMAIL is set"),
+    Provider("springer", "Springer Nature", "general", search_springer, fetch_springer,
+             "https://dev.springernature.com/", "Free key; fair-use limits and a result window of about 200 per query",
+             "SPRINGER_API_KEY", key_required=True, default_on=False, alt_key_setting="SPRINGER_OA_API_KEY"),
     Provider("semanticscholar", "Semantic Scholar", "cs", search_semanticscholar, fetch_semanticscholar,
              "https://api.semanticscholar.org/api-docs/", "Shared pool without a key (often rate-limited); 1 req/s with key",
              "SEMANTIC_SCHOLAR_API_KEY", default_on=False),

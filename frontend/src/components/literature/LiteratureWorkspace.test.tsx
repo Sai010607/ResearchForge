@@ -27,7 +27,7 @@ beforeEach(() => {
   vi.clearAllMocks();
   mocks.papers = [];
   const info = (id: string, name: string, group: string, on = true) => ({ id, name, group, requires_key: false, supports_key: false, key_configured: false, default_enabled: on, supports_full_text: false, rate_limit: "", docs: "", env_var: null });
-  mocks.providers.mockResolvedValue([info("openalex", "OpenAlex", "general"), info("pubmed", "PubMed", "biomedical"), info("arxiv", "arXiv", "cs"), info("semanticscholar", "Semantic Scholar", "cs", false)]);
+  mocks.providers.mockResolvedValue([info("openalex", "OpenAlex", "general"), info("pubmed", "PubMed", "biomedical"), info("arxiv", "arXiv", "cs"), info("semanticscholar", "Semantic Scholar", "cs", false), { ...info("springer", "Springer Nature", "general", false), requires_key: true, supports_key: true, key_configured: false, env_var: "SPRINGER_API_KEY" }]);
   mocks.search.mockResolvedValue({
     query: "q", source: "openalex,pubmed,arxiv", page: 1, results: [{ ...hit, pmcid: "PMC999", sources: [{ provider: "openalex", external_id: "W1" }, { provider: "pubmed", external_id: "9" }], links: [
       { kind: "publisher", label: "Publisher page", url: "https://publisher.example/x" },
@@ -93,6 +93,18 @@ describe("LiteratureWorkspace", () => {
     expect(screen.getByLabelText("arXiv")).toBeChecked();
     await user.click(screen.getByRole("button", { name: "Select all" }));
     for (const n of ["OpenAlex", "PubMed", "arXiv", "Semantic Scholar"]) expect(screen.getByLabelText(n)).toBeChecked();
+  });
+
+  it("a provider that needs a missing key is disabled and never selected by Select all", async () => {
+    const user = userEvent.setup();
+    render(<LiteratureWorkspace />);
+    const box = await screen.findByLabelText(/Springer Nature/);
+    expect(box).toBeDisabled();
+    expect(screen.getByText("(key needed)")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Select all" }));
+    expect(box).not.toBeChecked();
+    expect(screen.getByLabelText("PubMed")).toBeChecked();
+    expect(box.closest("label")).toHaveAttribute("title", expect.stringContaining("SPRINGER_API_KEY"));
   });
 
   it("shows a loading skeleton while searching and a retry after a whole-search failure", async () => {

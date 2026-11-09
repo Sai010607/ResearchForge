@@ -77,7 +77,7 @@ class SearchResponse(BaseModel):
 class SavePaper(BaseModel):
     """The client names a paper; the SERVER fetches it. Client-supplied titles are never stored."""
 
-    source: Literal["openalex", "europepmc", "pubmed", "crossref", "arxiv", "semanticscholar"]
+    source: Literal["openalex", "europepmc", "pubmed", "crossref", "arxiv", "semanticscholar", "springer"]
     external_id: str = Field(min_length=3, max_length=200)
 
 

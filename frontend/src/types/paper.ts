@@ -1,4 +1,4 @@
-export type ProviderId = "openalex" | "pubmed" | "europepmc" | "crossref" | "semanticscholar" | "arxiv";
+export type ProviderId = "openalex" | "pubmed" | "europepmc" | "crossref" | "semanticscholar" | "arxiv" | "springer";
 
 export interface ProviderInfo {
   id: ProviderId;
@@ -26,7 +26,7 @@ export interface ProviderStatus {
   ok: boolean;
   count: number;
   error: string | null;
-  error_kind?: "timeout" | "rate_limit" | "error" | null;
+  error_kind?: "timeout" | "rate_limit" | "not_configured" | "error" | null;
   duration_ms: number;
 }
 

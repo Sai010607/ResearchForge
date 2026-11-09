@@ -44,6 +44,15 @@ ARXIV_XML = """<?xml version="1.0"?>
    networks</title><summary>  We propose a model. </summary>
   <author><name>Grace Hopper</name></author><category term="cs.LG"/></entry>
 </feed>"""
+SPRINGER_JSON = {"result": [{"total": "2", "start": "1", "pageLength": "10", "recordsDisplayed": "2"}], "records": [
+    {"identifier": f"doi:{DOI}", "url": [{"format": "", "platform": "web", "value": "http://link.springer.com/article/10.1000/abc.1"},
+                                          {"format": "pdf", "platform": "web", "value": "http://link.springer.com/content/pdf/10.1000/abc.1.pdf"}],
+     "title": TITLE, "creators": [{"creator": "Lovelace, Ada"}], "publicationName": "NeuroImage", "openaccess": "true", "doi": DOI.upper(),
+     "publicationDate": "2023-05-01", "abstract": "We train a 3D CNN on ADNI.", "keyword": ["Alzheimer"]},
+    {"doi": "10.1007/book", "title": "A record that is kept", "creators": [{"creator": "Hopper"}], "publicationDate": "2019-01-01",
+     "url": [{"value": "http://dx.doi.org/10.1007/book"}], "abstract": {"h1": "Abstract", "p": "Structured abstract text."}},
+    {"title": "A book without DOI", "isbn": "123"},
+]}
 S2 = {"data": [
     {"paperId": "a" * 40, "title": TITLE, "abstract": "We train a 3D CNN on ADNI.", "year": 2023, "venue": "NeuroImage",
      "authors": [{"name": "Ada Lovelace"}], "externalIds": {"DOI": DOI, "PubMed": "111"}, "citationCount": 44, "url": "https://s2/a"},
@@ -58,7 +67,7 @@ def upstream(monkeypatch):
 
     def route(url):
         for name, frag in (("openalex", "openalex"), ("crossref", "crossref"), ("pubmed", "ncbi"), ("arxiv", "arxiv"),
-                           ("semanticscholar", "semanticscholar"), ("europepmc", "ebi.ac.uk")):
+                           ("semanticscholar", "semanticscholar"), ("springer", "springernature"), ("europepmc", "ebi.ac.uk")):
             if frag in url:
                 return name
         raise AssertionError(url)
@@ -76,6 +85,8 @@ def upstream(monkeypatch):
             return {"esearchresult": {"idlist": ["111", "222"]}}
         if name == "semanticscholar":
             return S2 if url.endswith("/search") else S2["data"][0]
+        if name == "springer":
+            return SPRINGER_JSON
         if name == "europepmc":
             return {"resultList": {"result": []}}
         raise AssertionError(url)
@@ -178,7 +189,8 @@ def test_providers_endpoint_lists_registry_without_secrets(client, settings, mon
     r = client.get("/api/literature/providers")
     assert r.status_code == 200 and "SECRET-KEY-VALUE" not in r.text
     by = {p["id"]: p for p in r.json()}
-    assert set(by) == {"openalex", "pubmed", "europepmc", "crossref", "semanticscholar", "arxiv"}
+    assert set(by) == {"openalex", "pubmed", "europepmc", "crossref", "semanticscholar", "arxiv", "springer"}
+    assert by["springer"]["requires_key"] is True and by["springer"]["key_configured"] is False and by["springer"]["default_enabled"] is False
     assert by["semanticscholar"]["key_configured"] is True and by["semanticscholar"]["default_enabled"] is True
     assert by["openalex"]["supports_full_text"] is False and by["pubmed"]["group"] == "biomedical"
 
@@ -192,7 +204,7 @@ def test_default_search_excludes_semantic_scholar_without_a_key(client, upstream
 
 def test_all_providers_dedupe_counts_and_status(client, upstream):
     register(client)
-    r = client.get("/api/literature/search", params={"q": "alzheimer mri", "providers": ",".join(discovery.SOURCE_IDS)})
+    r = client.get("/api/literature/search", params={"q": "alzheimer mri", "providers": ",".join(i for i in discovery.SOURCE_IDS if i != "springer")})
     body = r.json()
     returned = {p["provider"]: p["count"] for p in body["providers"]}
     assert returned == {"openalex": 1, "pubmed": 2, "europepmc": 0, "crossref": 2, "semanticscholar": 2, "arxiv": 1}
@@ -402,3 +414,64 @@ def test_doi_org_landing_page_is_not_presented_as_a_publisher_page():
     assert kinds == {"doi", "openalex"}
     real = discovery.build_links({"source": "openalex", "external_id": "W1", "doi": DOI, "publisher_url": "https://www.nature.com/articles/x"})
     assert [link["kind"] for link in real][:2] == ["publisher", "doi"]
+
+
+# ------------------------------------------------------------------ Springer Nature
+def test_springer_parser_handles_names_urls_abstract_shapes_and_skips_doiless_records():
+    recs = [discovery.parse_springer_record(r) for r in SPRINGER_JSON["records"]]
+    a, b, none = recs
+    assert none is None
+    assert a["doi"] == DOI and a["authors"] == ["Ada Lovelace"] and a["year"] == 2023 and a["venue"] == "NeuroImage"
+    assert a["publisher_url"] == "https://link.springer.com/article/10.1000/abc.1" and a["abstract"] == "We train a 3D CNN on ADNI."
+    assert b["authors"] == ["Hopper"] and b["abstract"] == "Abstract Structured abstract text."
+    assert b["publisher_url"] is None and b["url"] == "https://doi.org/10.1007/book"  # doi.org is not a publisher page
+
+
+def test_springer_without_a_key_is_off_by_default_and_reports_not_configured(client, upstream):
+    register(client)
+    r = client.get("/api/literature/search", params={"q": "alzheimer mri"})
+    assert "springer" not in [p["provider"] for p in r.json()["providers"]]
+    r = client.get("/api/literature/search", params={"q": "alzheimer mri", "providers": "openalex,springer"})
+    st = {p["provider"]: p for p in r.json()["providers"]}
+    assert st["springer"]["ok"] is False and st["springer"]["error_kind"] == "not_configured" and "SPRINGER_API_KEY" in st["springer"]["error"]
+    assert st["openalex"]["ok"] and not any(c[0] == "springer" for c in upstream["calls"])
+
+
+def test_springer_with_key_searches_meta_v2_pages_and_merges_by_doi(client, upstream, settings, monkeypatch):
+    register(client)
+    monkeypatch.setattr(settings, "springer_api_key", "SPR-SECRET")
+    assert next(p for p in client.get("/api/literature/providers").json() if p["id"] == "springer")["default_enabled"] is True
+    body = client.get("/api/literature/search", params={"q": "alzheimer mri", "providers": "openalex,springer", "page": 2}).json()
+    call = next(c for c in upstream["calls"] if c[0] == "springer")
+    assert call[1] == {"q": "alzheimer mri", "p": 10, "s": 11, "api_key": "SPR-SECRET"}
+    main = next(p for p in body["results"] if p["doi"] == DOI)
+    assert {s["provider"] for s in main["sources"]} == {"openalex", "springer"}
+    assert "SPR-SECRET" not in client.get("/api/literature/providers").text and "SPR-SECRET" not in str(body)
+    assert len(body["results"]) == 2  # OpenAlex paper merged with Springer's; the Springer-only record is kept
+
+
+def test_springer_oa_key_alone_uses_the_open_access_endpoint(client, upstream, settings, monkeypatch):
+    register(client)
+    monkeypatch.setattr(settings, "springer_oa_api_key", "OA-KEY")
+    seen = []
+    orig = literature.http_get_json
+    monkeypatch.setattr(literature, "http_get_json", lambda url, params, headers=None: (seen.append(url), orig(url, params))[1])
+    client.get("/api/literature/search", params={"q": "alzheimer mri", "providers": "springer"})
+    assert seen == ["https://api.springernature.com/openaccess/json"]
+
+
+def test_springer_save_fetches_by_doi_and_rejects_injection(client, upstream, settings, monkeypatch):
+    register(client)
+    monkeypatch.setattr(settings, "springer_api_key", "k")
+    pid = client.post("/api/projects", json=VALID).json()["id"]
+    r = client.post(f"/api/projects/{pid}/papers", json={"source": "springer", "external_id": DOI})
+    assert r.status_code == 201 and r.json()["source"] == "springer" and r.json()["publisher_url"].startswith("https://link.springer.com/")
+    q = next(c for c in upstream["calls"] if c[0] == "springer")[1]["q"]
+    assert q == f'doi:"{DOI}"'
+    bad = client.post(f"/api/projects/{pid}/papers", json={"source": "springer", "external_id": '10.1000/x" OR title:"y'})
+    assert bad.status_code == 404
+
+
+def test_api_keys_are_not_logged_by_httpx():
+    import logging
+    assert logging.getLogger("httpx").getEffectiveLevel() >= logging.WARNING

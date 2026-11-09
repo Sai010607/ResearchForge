@@ -10,10 +10,11 @@ import { ApiError, api } from "@/lib/api";
 import { cn } from "@/lib/utils";
 import type { ExtractedTag, Paper, PaperHit, ProviderInfo, ProviderStatus } from "@/types/paper";
 
+const usable = (p: ProviderInfo) => !p.requires_key || p.key_configured; // providers that need a key the server lacks cannot be selected
 const PRESETS: { label: string; pick: (p: ProviderInfo[]) => string[] }[] = [
-  { label: "Select all", pick: (p) => p.map((x) => x.id) },
-  { label: "Biomedical", pick: (p) => p.filter((x) => x.group === "biomedical" || x.id === "openalex").map((x) => x.id) },
-  { label: "Computer science", pick: (p) => p.filter((x) => x.group === "cs" || x.id === "openalex").map((x) => x.id) },
+  { label: "Select all", pick: (p) => p.filter(usable).map((x) => x.id) },
+  { label: "Biomedical", pick: (p) => p.filter((x) => usable(x) && (x.group === "biomedical" || x.id === "openalex")).map((x) => x.id) },
+  { label: "Computer science", pick: (p) => p.filter((x) => usable(x) && (x.group === "cs" || x.id === "openalex")).map((x) => x.id) },
   { label: "Deselect all", pick: () => [] },
 ];
 const TAG_GROUPS = [
@@ -297,13 +298,15 @@ export function LiteratureWorkspace() {
                     ))}
                     <span className="mx-1 h-4 w-px bg-line" aria-hidden />
                     {providers.map((p) => {
-                      const on = selected.includes(p.id);
+                      const off = !usable(p);
+                      const on = !off && selected.includes(p.id);
                       return (
-                        <label key={p.id} title={`${p.rate_limit}${p.supports_key && !p.key_configured ? ". Optional API key not set on the server." : ""}`}
-                          className={cn("cursor-pointer rounded-full border px-3 py-1 text-xs", on ? "border-sky-400 text-white" : "border-line text-muted")}>
-                          <input type="checkbox" className="sr-only" checked={on}
+                        <label key={p.id}
+                          title={off ? `Needs an API key (${p.env_var ?? "see LITERATURE.md"}) set on the server. Not configured.` : `${p.rate_limit}${p.supports_key && !p.key_configured ? ". Optional API key not set on the server." : ""}`}
+                          className={cn("rounded-full border px-3 py-1 text-xs", off ? "cursor-not-allowed border-dashed border-line text-muted/50" : "cursor-pointer", !off && (on ? "border-sky-400 text-white" : "border-line text-muted"))}>
+                          <input type="checkbox" className="sr-only" checked={on} disabled={off}
                             onChange={() => setSelected((s) => (on ? s.filter((x) => x !== p.id) : [...s, p.id]))} />
-                          {p.name}
+                          {p.name}{off && <span className="ml-1 text-[10px]">(key needed)</span>}
                         </label>
                       );
                     })}
@@ -326,7 +329,7 @@ export function LiteratureWorkspace() {
                     {Object.values(stats).map((st) => (
                       <span key={st.provider} title={st.error ?? `${st.count} records returned, before duplicates were merged`}
                         className={cn("rounded border px-1.5 py-0.5", st.ok ? "border-line" : "border-red-500/40 text-red-300")}>
-                        {st.name}: {st.ok ? st.count : st.error_kind === "timeout" ? "timed out" : st.error_kind === "rate_limit" ? "rate-limited" : "failed"}
+                        {st.name}: {st.ok ? st.count : st.error_kind === "timeout" ? "timed out" : st.error_kind === "rate_limit" ? "rate-limited" : st.error_kind === "not_configured" ? "not configured" : "failed"}
                       </span>
                     ))}
                   </p>

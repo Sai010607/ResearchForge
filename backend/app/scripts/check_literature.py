@@ -18,6 +18,9 @@ def main() -> int:
         name, fn = p.name, p.search
         try:
             papers = fn(query, 1, 3)
+        except literature.LiteratureNotConfigured as exc:
+            print(f"[SKIP] {name}: {exc}")
+            continue
         except literature.LiteratureError as exc:
             # Semantic Scholar without a key is often rate-limited: report, but do not fail the run
             print(f"[{'WARN' if p.id == 'semanticscholar' else 'FAIL'}] {name}: {exc}")

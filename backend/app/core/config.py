@@ -48,6 +48,9 @@ class Settings(BaseSettings):
     # optional keys: Semantic Scholar (higher rate limit) and NCBI (10 req/s instead of 3). Server-side only.
     semantic_scholar_api_key: str = ""
     ncbi_api_key: str = ""
+    # Springer Nature: free key from dev.springernature.com. Meta API key preferred; an Open Access API key also works.
+    springer_api_key: str = ""
+    springer_oa_api_key: str = ""
 
     # --- abuse protection ---
     rate_limit_enabled: bool = True
