@@ -165,7 +165,7 @@ export function LiteratureWorkspace() {
       {noProject ? (
         <div className="mt-8 rounded-2xl border border-line p-6 text-sm">
           <p>Create a research project first. Saved papers belong to a project.</p>
-          <Link href="/projects/new" className={cn(buttonStyles("primary"), "mt-4 inline-flex")}>Create a project</Link>
+          <Link href="/workspace" className={cn(buttonStyles("primary"), "mt-4 inline-flex")}>Create a project</Link>
         </div>
       ) : (
         <>
