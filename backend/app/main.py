@@ -1,5 +1,7 @@
 import logging
 
+from typing import Any
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import text
@@ -33,12 +35,17 @@ app.include_router(literature.router)
 
 
 @app.get("/api/health", tags=["system"])
-def health() -> dict[str, str]:
-    """Reports API and database connectivity (used by the UI status indicator)."""
+def health() -> dict[str, Any]:
+    """API and database connectivity (used by the UI status indicator) plus which optional services are
+    configured. Only booleans / mode names are reported, never key values."""
+    from app.core.mailer import mail_mode
+    from app.services import discovery
+
+    cfg = {"email": mail_mode(), "literature_keys": [p.id for p in discovery.PROVIDERS if p.has_key()]}
     try:
         with engine.connect() as conn:
             conn.execute(text("SELECT 1"))
-        return {"status": "ok", "database": "connected"}
+        return {"status": "ok", "database": "connected", **cfg}
     except Exception:
         logging.getLogger(__name__).exception("health check: database unreachable")
-        return {"status": "degraded", "database": "unreachable"}
+        return {"status": "degraded", "database": "unreachable", **cfg}

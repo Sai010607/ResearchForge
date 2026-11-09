@@ -25,3 +25,14 @@ services:
         generateValue: true
       - key: DATABASE_URL
         sync: false   # paste your Neon URL, see README_DEPLOY.md
+      # --- optional services; enter values in the Render dashboard (never commit them) ---
+      - key: BREVO_API_KEY
+        sync: false   # HTTPS email API: SMTP ports are blocked on Render free instances
+      - key: MAIL_FROM
+        sync: false   # e.g. ResearchForge <you@example.com>; must be a sender verified in Brevo
+      - key: SPRINGER_API_KEY
+        sync: false   # Springer Nature Meta API key (dev.springernature.com)
+      - key: SPRINGER_OA_API_KEY
+        sync: false
+      - key: CONTACT_EMAIL
+        sync: false   # lets OpenAlex / Crossref / NCBI put you in their faster "polite" pools

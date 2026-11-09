@@ -61,12 +61,15 @@ class Settings(BaseSettings):
     argon2_memory_kib: int = 65536
     argon2_parallelism: int = 4
 
-    # --- email (leave smtp_host empty to use the console/log mailer) ---
+    # --- email: BREVO_API_KEY (HTTPS) > SMTP_HOST (SMTP) > console/log mailer ---
     smtp_host: str = ""
     smtp_port: int = 587
     smtp_user: str = ""
     smtp_password: str = ""
     smtp_starttls: bool = True
+    smtp_ssl: bool = False  # implicit TLS (port 465); leave False for STARTTLS (587)
+    # HTTPS email API (Brevo). Preferred on hosts that block SMTP ports, e.g. Render free instances.
+    brevo_api_key: str = ""
     mail_from: str = "ResearchForge <no-reply@researchforge.local>"
 
     @model_validator(mode="after")

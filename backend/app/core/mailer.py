@@ -1,6 +1,7 @@
 """Pluggable mailer.
 
-- SMTP_HOST set  -> real delivery over SMTP (STARTTLS by default).
+- BREVO_API_KEY set -> real delivery over HTTPS (works where SMTP ports are blocked, e.g. Render free).
+- SMTP_HOST set     -> real delivery over SMTP (STARTTLS by default, SMTP_SSL=true for port 465).
 - otherwise      -> console backend: the message is logged (dev only) and kept in OUTBOX so
                     tests can read the verification / reset links. Nothing is faked: in this mode
                     no email leaves the machine and the README says so.
@@ -9,7 +10,10 @@ import logging
 import smtplib
 from dataclasses import dataclass
 from email.message import EmailMessage
+from email.utils import parseaddr
 from urllib.parse import quote
+
+import httpx
 
 from app.core.config import get_settings
 
@@ -27,27 +31,63 @@ class Mail:
 OUTBOX: list[Mail] = []  # console backend only (capped)
 
 
+BREVO_URL = "https://api.brevo.com/v3/smtp/email"
+
+
+def mail_mode() -> str:
+    """How mail leaves the server: 'brevo' (HTTPS API), 'smtp', or 'console' (logged only, nothing sent)."""
+    s = get_settings()
+    return "brevo" if s.brevo_api_key else "smtp" if s.smtp_host else "console"
+
+
+def _send_brevo(mail: Mail) -> None:
+    s = get_settings()
+    name, addr = parseaddr(s.mail_from)
+    r = httpx.post(
+        BREVO_URL,
+        headers={"api-key": s.brevo_api_key, "accept": "application/json"},
+        json={"sender": {"name": name or "ResearchForge", "email": addr}, "to": [{"email": mail.to}],
+              "subject": mail.subject, "textContent": mail.text, "htmlContent": mail.html},
+        timeout=15,
+    )
+    if r.status_code >= 300:  # the body explains e.g. an unverified sender; it never contains the key
+        raise RuntimeError(f"Brevo HTTP {r.status_code}: {r.text[:300]}")
+
+
+def _send_smtp(mail: Mail) -> None:
+    s = get_settings()
+    msg = EmailMessage()
+    msg["From"], msg["To"], msg["Subject"] = s.mail_from, mail.to, mail.subject
+    msg.set_content(mail.text)
+    msg.add_alternative(mail.html, subtype="html")
+    if s.smtp_ssl:
+        with smtplib.SMTP_SSL(s.smtp_host, s.smtp_port, timeout=15) as smtp:
+            if s.smtp_user:
+                smtp.login(s.smtp_user, s.smtp_password)
+            smtp.send_message(msg)
+        return
+    with smtplib.SMTP(s.smtp_host, s.smtp_port, timeout=15) as smtp:
+        if s.smtp_starttls:
+            smtp.starttls()
+        if s.smtp_user:
+            smtp.login(s.smtp_user, s.smtp_password)
+        smtp.send_message(msg)
+
+
 def _deliver(mail: Mail) -> None:
     s = get_settings()
-    if s.smtp_host:
-        msg = EmailMessage()
-        msg["From"], msg["To"], msg["Subject"] = s.mail_from, mail.to, mail.subject
-        msg.set_content(mail.text)
-        msg.add_alternative(mail.html, subtype="html")
+    mode = mail_mode()
+    if mode != "console":
         try:
-            with smtplib.SMTP(s.smtp_host, s.smtp_port, timeout=15) as smtp:
-                if s.smtp_starttls:
-                    smtp.starttls()
-                if s.smtp_user:
-                    smtp.login(s.smtp_user, s.smtp_password)
-                smtp.send_message(msg)
+            (_send_brevo if mode == "brevo" else _send_smtp)(mail)
+            log.info("email sent via %s to %s", mode, mail.to)
         except Exception:
-            log.exception("SMTP delivery failed for %s", mail.to)
+            log.exception("EMAIL DELIVERY FAILED via %s for %s", mode, mail.to)
         return
     OUTBOX.append(mail)
     del OUTBOX[:-100]
     if s.environment == "production":
-        log.warning("Email not sent: SMTP_HOST is not configured")
+        log.warning("Email not sent: set BREVO_API_KEY (or SMTP_HOST) to enable email delivery")
     else:
         log.info("[console mailer] To: %s | %s\n%s", mail.to, mail.subject, mail.text)
 
